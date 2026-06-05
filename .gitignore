@@ -203,6 +203,10 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Local audio capture outputs
+artifacts/audio/*.wav
+artifacts/audio/*.flac
+
 # Ruff stuff:
 .ruff_cache/
 
