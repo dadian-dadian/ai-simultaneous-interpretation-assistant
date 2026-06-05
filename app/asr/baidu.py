@@ -121,7 +121,6 @@ class BaiduRealtimeAsrClient:
                     ensure_ascii=False,
                 )
             )
-            self._consume_start_response(connection)
             for frame in _split_pcm_frames(
                 pcm_payload,
                 sample_rate=sample_rate,
@@ -136,27 +135,21 @@ class BaiduRealtimeAsrClient:
             connection.close()
         return transcripts
 
-    def _consume_start_response(self, connection) -> None:
-        response = _parse_ws_message(connection.recv())
-        response_type = response.get("type")
-        if response_type == "HEARTBEAT":
-            return
-        err_no = int(response.get("err_no", 0))
-        if err_no != 0:
-            err_msg = response.get("err_msg") or "unknown error"
-            raise AsrError(f"百度实时 ASR START 失败：err_no={err_no}，{err_msg}")
-
     def _receive_transcripts(self, connection) -> list[BaiduRealtimeTranscript]:
         transcripts: list[BaiduRealtimeTranscript] = []
         while True:
             try:
-                payload = _parse_ws_message(connection.recv())
+                message = connection.recv()
             except websocket.WebSocketConnectionClosedException:
                 break
             except websocket.WebSocketTimeoutException:
                 if transcripts:
                     break
                 raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。") from None
+
+            if message in {"", b""}:
+                break
+            payload = _parse_ws_message(message)
 
             response_type = payload.get("type")
             if response_type == "HEARTBEAT":
@@ -165,7 +158,12 @@ class BaiduRealtimeAsrClient:
             err_no = int(payload.get("err_no", 0))
             if err_no != 0:
                 err_msg = payload.get("err_msg") or "unknown error"
+                if response_type == "START":
+                    raise AsrError(f"百度实时 ASR START 失败：err_no={err_no}，{err_msg}")
                 raise AsrError(f"百度实时 ASR 识别失败：err_no={err_no}，{err_msg}")
+
+            if response_type == "START":
+                continue
 
             result = str(payload.get("result", "")).strip()
             if response_type == "MID_TEXT":
