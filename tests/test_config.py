@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.core.config import AppConfig
@@ -7,8 +9,10 @@ from app.core.config import AppConfig
 
 class AppConfigTest(unittest.TestCase):
     def test_default_config_uses_mock_providers(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            config = AppConfig.from_env()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
 
         self.assertEqual(config.asr_provider, "mock")
         self.assertEqual(config.asr_baidu_dev_pid, "auto")
@@ -18,20 +22,22 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.target_language, "zh-CN")
 
     def test_baidu_asr_config_can_be_loaded_from_env(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "ASR_PROVIDER": "baidu-realtime",
-                "ASR_APP_ID": "123",
-                "ASR_API_KEY": "app-key",
-                "ASR_BAIDU_WS_URL": "wss://example.test/realtime_asr",
-                "ASR_BAIDU_CUID": "test-cuid",
-                "ASR_BAIDU_DEV_PID": "17372",
-                "ASR_TIMEOUT_SECONDS": "12.5",
-            },
-            clear=True,
-        ):
-            config = AppConfig.from_env()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "ASR_PROVIDER": "baidu-realtime",
+                        "ASR_APP_ID": "123",
+                        "ASR_API_KEY": "app-key",
+                        "ASR_BAIDU_WS_URL": "wss://example.test/realtime_asr",
+                        "ASR_BAIDU_CUID": "test-cuid",
+                        "ASR_BAIDU_DEV_PID": "17372",
+                        "ASR_TIMEOUT_SECONDS": "12.5",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
 
         self.assertEqual(config.asr_provider, "baidu-realtime")
         self.assertEqual(config.asr_app_id, "123")
@@ -40,6 +46,39 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.asr_baidu_cuid, "test-cuid")
         self.assertEqual(config.asr_baidu_dev_pid, "17372")
         self.assertEqual(config.asr_timeout_seconds, 12.5)
+
+    def test_dotenv_file_can_be_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dotenv_path = Path(tmp_dir) / ".env"
+            dotenv_path.write_text(
+                "\n".join(
+                    [
+                        "ASR_PROVIDER=baidu-realtime",
+                        "ASR_APP_ID=123",
+                        "ASR_API_KEY=app-key",
+                        "ASR_BAIDU_CUID=test-cuid",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(os.environ, {}, clear=True):
+                    config = AppConfig.from_env()
+
+        self.assertEqual(config.asr_provider, "baidu-realtime")
+        self.assertEqual(config.asr_app_id, "123")
+        self.assertEqual(config.asr_api_key, "app-key")
+        self.assertEqual(config.asr_baidu_cuid, "test-cuid")
+
+    def test_real_environment_overrides_dotenv_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dotenv_path = Path(tmp_dir) / ".env"
+            dotenv_path.write_text("ASR_PROVIDER=mock\n", encoding="utf-8")
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(os.environ, {"ASR_PROVIDER": "baidu-realtime"}, clear=True):
+                    config = AppConfig.from_env()
+
+        self.assertEqual(config.asr_provider, "baidu-realtime")
 
     def test_safe_dict_masks_api_keys(self) -> None:
         config = AppConfig(

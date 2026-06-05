@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,7 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> AppConfig:
+        load_dotenv(dotenv_path=project_root() / ".env", override=False)
         return cls(
             asr_provider=os.getenv("ASR_PROVIDER", cls.asr_provider),
             asr_app_id=os.getenv("ASR_APP_ID", cls.asr_app_id),
@@ -88,6 +92,10 @@ class AppConfig:
         if len(value) <= 8:
             return "********"
         return f"{value[:4]}****{value[-4:]}"
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def _env_float(name: str, default: float) -> float:
