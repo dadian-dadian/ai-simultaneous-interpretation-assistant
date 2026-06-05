@@ -10,6 +10,7 @@ import numpy as np
 from app.asr import AsrResult
 from app.audio.capture import AudioChunk
 from app.main import main
+from app.translate import TranslationResult
 
 
 class MainEntryTest(unittest.TestCase):
@@ -48,6 +49,32 @@ class MainEntryTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("ASR 提供方：mock", output.getvalue())
         self.assertIn("原文：hello world", output.getvalue())
+
+    @patch("app.main.create_translator_client")
+    def test_translate_text_prints_translation_result(self, create_translator: Mock) -> None:
+        translator = create_translator.return_value
+        translator.translate.return_value = TranslationResult(
+            text="你好，世界",
+            provider="openai-compatible",
+            model="model-a",
+            source_language="en",
+            target_language="zh-CN",
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--translate-text",
+                    "hello world",
+                    "--translation-api-key",
+                    "translation-key",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("翻译提供方：openai-compatible", output.getvalue())
+        self.assertIn("译文：你好，世界", output.getvalue())
 
 
 if __name__ == "__main__":

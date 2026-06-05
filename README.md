@@ -96,7 +96,7 @@ tests/
 
 ## 当前状态
 
-项目处于核心链路逐步接入阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理、模拟字幕流演示、Windows 系统音频捕获、Silero VAD 分段和百度实时 ASR WebSocket 适配器。桌面主流程在 `ASR_PROVIDER=baidu-realtime` 时会启动真实系统音频监听，将百度返回的 `MID_TEXT` 作为临时字幕、`FIN_TEXT` 作为正式字幕接入主窗口与悬浮窗；在 `ASR_PROVIDER=mock` 时仍保留内置演示。当前 PR 先展示 ASR 原文结果，中文翻译和字幕修正 AI 能力将在后续 PR 接入。
+项目处于核心链路逐步接入阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理、模拟字幕流演示、Windows 系统音频捕获、Silero VAD 分段、百度实时 ASR WebSocket 适配器和 OpenAI-compatible 真实翻译适配器。桌面主流程在 `ASR_PROVIDER=baidu-realtime` 时会启动真实系统音频监听，将百度返回的 `MID_TEXT` 作为临时字幕、`FIN_TEXT` 作为正式字幕接入主窗口与悬浮窗，并在真实翻译模型返回后用 `segment.update(reason="translation_final")` 回写中文字幕；在 `ASR_PROVIDER=mock` 时仍保留内置脚本演示，该演示不调用翻译模型。上下文纠错和术语一致性将在后续 PR 接入。
 
 ## 依赖说明
 
@@ -116,6 +116,8 @@ tests/
 项目内置 `assets/models/silero_vad.onnx`，来源为 Silero VAD 官方仓库。当前 VAD 路线只使用 ONNX Runtime，不引入 PyTorch / torchaudio。
 
 ASR 真实服务通过 `websocket-client` 调用百度智能云实时语音识别 WebSocket API。适配器会发送 `START` 控制帧、16k 单声道 PCM 二进制音频帧和 `FINISH` 控制帧，并解析 `MID_TEXT` 临时结果与 `FIN_TEXT` 最终结果。mock ASR 为本项目自研演示适配器，用于没有 API Key 时验证音频段到原文文本的链路。
+
+翻译真实服务通过标准库 HTTP 客户端调用 OpenAI-compatible Chat Completions API，目前不引入额外第三方 HTTP 依赖。系统要求配置真实模型的 `TRANSLATION_API_KEY`、`TRANSLATION_BASE_URL` 和 `TRANSLATION_MODEL`，不会在产品链路中返回假译文。自动化测试仅验证请求构造、响应解析和异常处理，不请求外部服务。
 
 依赖版本通过 `pyproject.toml` 和 `uv.lock` 管理，确保后续评审时可以复现相同环境。后续每次新增第三方库或框架时，将同步更新 README，说明依赖用途和原创功能边界。
 
@@ -139,7 +141,7 @@ uv sync
 
 项目启动时会自动读取仓库根目录下的 `.env` 文件。`.env` 已被 `.gitignore` 忽略，真实密钥不应提交到仓库。
 
-仓库提供 `.env.example` 作为模板，百度实时 ASR 的关键配置如下：
+仓库提供 `.env.example` 作为模板，百度实时 ASR 和真实翻译模型的关键配置如下：
 
 ```dotenv
 ASR_PROVIDER=baidu-realtime
@@ -147,6 +149,12 @@ ASR_APP_ID=你的百度 AppID
 ASR_API_KEY=你的百度 AppKey
 ASR_BAIDU_WS_URL=wss://vop.baidu.com/realtime_asr
 ASR_BAIDU_DEV_PID=auto
+
+TRANSLATION_PROVIDER=openai-compatible
+TRANSLATION_API_KEY=你的真实翻译模型 API Key
+TRANSLATION_BASE_URL=https://api.deepseek.com/v1
+TRANSLATION_MODEL=deepseek-chat
+TRANSLATION_TIMEOUT_SECONDS=30
 ```
 
 ### 启动主控制窗口
@@ -155,7 +163,7 @@ ASR_BAIDU_DEV_PID=auto
 uv run python -m app
 ```
 
-当前主窗口提供开始、暂停、停止、状态展示、音频源选择、翻译模式和字幕样式等基础界面。配置百度实时 ASR 后，点击“开始”会启动系统音频监听、Silero VAD 分段和百度 WebSocket 流式识别，`MID_TEXT` 会在当前字幕段原地刷新，`FIN_TEXT` 会确认当前字幕段；点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。未配置真实 ASR 时，可将 `ASR_PROVIDER` 设为 `mock` 使用内置演示模式。
+当前主窗口提供开始、暂停、停止、状态展示、音频源选择、传译模式和字幕样式等基础界面。配置百度实时 ASR 和真实翻译模型后，点击“开始”会启动系统音频监听、Silero VAD 分段、百度 WebSocket 流式识别和 OpenAI-compatible 翻译。`MID_TEXT` 会先更新原文临时字幕，防抖后的 partial 翻译会回写中文；`FIN_TEXT` 会确认当前字幕段，真实模型返回最终译文后再通过 `segment.update(reason="translation_final")` 回写中文字幕。点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。未配置真实 ASR 时，可将 `ASR_PROVIDER` 设为 `mock` 使用内置演示模式；该模式使用写死的双语脚本，不调用真实翻译模型。
 
 ### 演示模式
 
@@ -170,6 +178,25 @@ uv run python -m app
 ```powershell
 uv run python -m app --show-config
 ```
+
+### 测试真实翻译模型
+
+配置 `TRANSLATION_API_KEY`、`TRANSLATION_BASE_URL` 和 `TRANSLATION_MODEL` 后，可以直接测试翻译接口：
+
+```powershell
+uv run python -m app --translate-text "Today we are testing a real time subtitle translator."
+```
+
+也可以用命令行临时覆盖模型配置：
+
+```powershell
+uv run python -m app --translate-text "Hello world." `
+  --translation-api-key "你的真实翻译模型 API Key" `
+  --translation-base-url "https://api.deepseek.com/v1" `
+  --translation-model "deepseek-chat"
+```
+
+如果缺少真实模型密钥或接口返回异常，命令会输出清晰错误并退出，不会生成假译文。
 
 ### 查看系统音频设备
 
@@ -233,7 +260,7 @@ uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav
 uv run python -m app --preview-asr-stream --stream-duration 10 --chunk-duration 0.16 --asr-provider mock
 ```
 
-命令会通过独立采集线程捕获系统音频，并使用有界队列把最新音频块交给 VAD/ASR 消费，避免识别处理阻塞录音线程。Silero VAD 判断语音开始和结束后，百度实时 ASR WebSocket 会在 `speech_start` 后立即建立会话，并随着系统音频持续发送 160ms PCM 音频帧；收到 `MID_TEXT` 时输出临时结果，在 `speech_end` 后发送 `FINISH` 并输出 `FIN_TEXT` 最终识别结果。mock 模式适合验证基础链路；配置百度实时 ASR WebSocket 后，可用同一命令测试实际识别效果。
+命令会通过独立采集线程捕获系统音频，并使用有界队列把最新音频块交给 VAD/ASR 消费，避免识别处理阻塞录音线程。Silero VAD 判断语音开始和结束后，百度实时 ASR WebSocket 会在 `speech_start` 后立即建立会话，并随着系统音频持续发送 160ms PCM 音频帧；收到 `MID_TEXT` 时输出临时结果，在 `speech_end` 后发送 `FINISH` 并输出 `FIN_TEXT` 最终识别结果。mock 模式适合验证基础链路；配置百度实时 ASR WebSocket 后，可用同一命令测试实际识别效果。完整桌面翻译链路需要通过主窗口启动，命令行 ASR 预览只输出识别文本。
 
 ### 启动无 UI 骨架
 

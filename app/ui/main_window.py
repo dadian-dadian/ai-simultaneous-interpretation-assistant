@@ -250,7 +250,7 @@ class MainWindow(QMainWindow):
         return section
 
     def _build_mode_section(self) -> QWidget:
-        section = self._section("识别模式")
+        section = self._section("传译模式")
         layout = section.layout()
 
         button_row = QHBoxLayout()
@@ -431,6 +431,9 @@ class MainWindow(QMainWindow):
             preroll_seconds=profile.preroll_seconds,
             queue_size=profile.queue_size,
             dropped_chunks_warn_threshold=profile.dropped_chunks_warn_threshold,
+            partial_translation_debounce_seconds=profile.partial_translation_debounce_seconds,
+            final_context_sentences=profile.final_context_sentences,
+            min_partial_delta_chars=profile.min_partial_delta_chars,
         )
         worker.moveToThread(thread)
 
@@ -438,6 +441,7 @@ class MainWindow(QMainWindow):
         worker.subtitle_event.connect(self._handle_realtime_subtitle_event)
         worker.status_changed.connect(self._set_status)
         worker.dropped_chunks_changed.connect(self._handle_dropped_chunks_changed)
+        worker.translation_error_occurred.connect(self._handle_translation_error)
         worker.error_occurred.connect(self._handle_realtime_error)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -482,6 +486,11 @@ class MainWindow(QMainWindow):
         self._set_status("异常")
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText(message)
+
+    def _handle_translation_error(self, message: str) -> None:
+        self._set_status("翻译异常")
+        if self.correction_hint_label is not None:
+            self.correction_hint_label.setText(f"{message}，ASR 将继续运行并保留原文字幕。")
 
     def _handle_realtime_finished(self) -> None:
         self.realtime_thread = None
@@ -612,11 +621,13 @@ class MainWindow(QMainWindow):
 
     def _build_event_hint(self, event: SubtitleEvent, segment: SubtitleSegment) -> str:
         if segment.status == SubtitleSegmentStatus.UPDATED:
+            if event.reason == "translation_final":
+                return "翻译精修：真实模型已回写最终中文字幕。"
             reason = event.reason or "context_correction"
             return f"已修正：{reason}"
         if segment.status == SubtitleSegmentStatus.FINAL:
             if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
-                return "FIN_TEXT：当前语音段已确认，翻译模块接入后会替换为中文字幕。"
+                return "FIN_TEXT：当前语音段已确认，正在等待真实翻译模型返回。"
             return "正式字幕：当前语音段已稳定。"
         if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
             return "MID_TEXT：实时识别中的临时字幕，后续 FIN_TEXT 会回写确认。"
@@ -640,15 +651,17 @@ class MainWindow(QMainWindow):
         if self.source_caption_label is not None:
             self.source_caption_label.setText("等待系统音频中的语音。")
         if self.translation_caption_label is not None:
-            self.translation_caption_label.setText("实时 ASR 已准备，识别结果会先以原文字幕展示。")
+            self.translation_caption_label.setText("实时翻译已准备，识别结果会先显示原文再回写中文。")
         if self.correction_hint_label is not None:
-            self.correction_hint_label.setText("MID_TEXT 作为临时字幕，FIN_TEXT 作为正式字幕。")
+            self.correction_hint_label.setText(
+                "MID_TEXT 作为临时字幕，FIN_TEXT 确认后由真实模型回写中文字幕。"
+            )
         if self.history_list is not None:
             self.history_list.clear()
             self.history_list.addItem("实时字幕历史将在这里更新。")
         self.overlay.set_caption(
             source_text="等待系统音频中的语音。",
-            zh_text="实时 ASR 已准备。",
+            zh_text="实时翻译已准备。",
             state=SubtitleSegmentStatus.PARTIAL.value,
         )
 

@@ -16,8 +16,11 @@ class AppConfig:
     asr_baidu_cuid: str = "ai_interpreter_windows"
     asr_baidu_dev_pid: str = "auto"
     asr_timeout_seconds: float = 30.0
-    translation_provider: str = "mock"
+    translation_provider: str = "openai-compatible"
     translation_api_key: str = ""
+    translation_base_url: str = "https://api.deepseek.com/v1"
+    translation_model: str = "deepseek-chat"
+    translation_timeout_seconds: float = 30.0
     source_language: str = "en"
     target_language: str = "zh-CN"
     subtitle_mode: str = "bilingual"
@@ -45,6 +48,18 @@ class AppConfig:
                 "TRANSLATION_API_KEY",
                 cls.translation_api_key,
             ),
+            translation_base_url=os.getenv(
+                "TRANSLATION_BASE_URL",
+                cls.translation_base_url,
+            ),
+            translation_model=os.getenv(
+                "TRANSLATION_MODEL",
+                cls.translation_model,
+            ),
+            translation_timeout_seconds=_env_float(
+                "TRANSLATION_TIMEOUT_SECONDS",
+                cls.translation_timeout_seconds,
+            ),
             source_language=os.getenv("SOURCE_LANGUAGE", cls.source_language),
             target_language=os.getenv("TARGET_LANGUAGE", cls.target_language),
             subtitle_mode=os.getenv("SUBTITLE_MODE", cls.subtitle_mode),
@@ -62,6 +77,9 @@ class AppConfig:
             asr_timeout_seconds=self.asr_timeout_seconds,
             translation_provider=self.translation_provider,
             translation_api_key=self.translation_api_key,
+            translation_base_url=self.translation_base_url,
+            translation_model=self.translation_model,
+            translation_timeout_seconds=self.translation_timeout_seconds,
             source_language=self.source_language,
             target_language=self.target_language,
             subtitle_mode=self.subtitle_mode,
@@ -79,6 +97,9 @@ class AppConfig:
             "asr_timeout_seconds": self.asr_timeout_seconds,
             "translation_provider": self.translation_provider,
             "translation_api_key": self._mask_secret(self.translation_api_key),
+            "translation_base_url": self.translation_base_url,
+            "translation_model": self.translation_model,
+            "translation_timeout_seconds": self.translation_timeout_seconds,
             "source_language": self.source_language,
             "target_language": self.target_language,
             "subtitle_mode": self.subtitle_mode,

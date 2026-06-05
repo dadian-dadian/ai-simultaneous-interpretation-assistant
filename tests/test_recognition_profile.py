@@ -14,6 +14,8 @@ class RecognitionProfileTest(unittest.TestCase):
         self.assertEqual(profile.min_silence_ms, 800)
         self.assertEqual(profile.preroll_seconds, 0.8)
         self.assertEqual(profile.queue_size, 32)
+        self.assertEqual(profile.partial_translation_debounce_seconds, 0.8)
+        self.assertEqual(profile.final_context_sentences, 3)
 
     def test_low_latency_profile_is_more_aggressive(self) -> None:
         profile = get_recognition_profile("low-latency")
@@ -21,6 +23,8 @@ class RecognitionProfileTest(unittest.TestCase):
         self.assertEqual(profile.min_silence_ms, 500)
         self.assertEqual(profile.preroll_seconds, 0.6)
         self.assertEqual(profile.queue_size, 32)
+        self.assertEqual(profile.partial_translation_debounce_seconds, 0.6)
+        self.assertEqual(profile.final_context_sentences, 2)
 
     def test_high_accuracy_profile_uses_larger_queue(self) -> None:
         profile = get_recognition_profile("high-accuracy")
@@ -28,6 +32,8 @@ class RecognitionProfileTest(unittest.TestCase):
         self.assertEqual(profile.min_silence_ms, 1100)
         self.assertEqual(profile.preroll_seconds, 1.0)
         self.assertEqual(profile.queue_size, 64)
+        self.assertEqual(profile.partial_translation_debounce_seconds, 1.0)
+        self.assertEqual(profile.final_context_sentences, 4)
 
     def test_recognition_mode_from_index_maps_ui_buttons(self) -> None:
         self.assertEqual(recognition_mode_from_index(0), "low-latency")

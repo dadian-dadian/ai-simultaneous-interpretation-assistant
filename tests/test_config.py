@@ -8,7 +8,7 @@ from app.core.config import AppConfig
 
 
 class AppConfigTest(unittest.TestCase):
-    def test_default_config_uses_mock_providers(self) -> None:
+    def test_default_config_uses_real_translation_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
                 with patch.dict(os.environ, {}, clear=True):
@@ -17,7 +17,10 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.asr_provider, "mock")
         self.assertEqual(config.asr_baidu_dev_pid, "auto")
         self.assertEqual(config.asr_timeout_seconds, 30.0)
-        self.assertEqual(config.translation_provider, "mock")
+        self.assertEqual(config.translation_provider, "openai-compatible")
+        self.assertEqual(config.translation_base_url, "https://api.deepseek.com/v1")
+        self.assertEqual(config.translation_model, "deepseek-chat")
+        self.assertEqual(config.translation_timeout_seconds, 30.0)
         self.assertEqual(config.source_language, "en")
         self.assertEqual(config.target_language, "zh-CN")
 
@@ -69,6 +72,28 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.asr_app_id, "123")
         self.assertEqual(config.asr_api_key, "app-key")
         self.assertEqual(config.asr_baidu_cuid, "test-cuid")
+
+    def test_translation_config_can_be_loaded_from_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "TRANSLATION_PROVIDER": "openai-compatible",
+                        "TRANSLATION_API_KEY": "translation-key",
+                        "TRANSLATION_BASE_URL": "https://example.test/v1",
+                        "TRANSLATION_MODEL": "model-a",
+                        "TRANSLATION_TIMEOUT_SECONDS": "9.5",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+
+        self.assertEqual(config.translation_provider, "openai-compatible")
+        self.assertEqual(config.translation_api_key, "translation-key")
+        self.assertEqual(config.translation_base_url, "https://example.test/v1")
+        self.assertEqual(config.translation_model, "model-a")
+        self.assertEqual(config.translation_timeout_seconds, 9.5)
 
     def test_real_environment_overrides_dotenv_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

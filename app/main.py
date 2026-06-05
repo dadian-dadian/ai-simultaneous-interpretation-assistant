@@ -16,6 +16,7 @@ from app.audio.vad import SileroOnnxVad, SileroVadSegmenter, VadEventType
 from app.core.config import AppConfig
 from app.core.logging import configure_logging
 from app.core.recognition_profile import RecognitionProfile, get_recognition_profile
+from app.translate import TranslationError, TranslationRequest, create_translator_client
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--preview-asr-stream",
         action="store_true",
         help="预览系统音频流的 VAD 分段和 ASR 识别。",
+    )
+    parser.add_argument(
+        "--translate-text",
+        default=None,
+        help="使用真实翻译模型翻译一段文本并退出。",
     )
     parser.add_argument("--stream-duration", type=float, default=5.0, help="VAD 预览时长，单位秒。")
     parser.add_argument(
@@ -124,6 +130,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--asr-language", default=None, help="ASR 识别语言，例如 en。")
     parser.add_argument("--asr-prompt", default="", help="传给 ASR 的上下文提示词。")
     parser.add_argument(
+        "--translation-provider",
+        default=None,
+        help="覆盖翻译提供方，目前支持 openai-compatible。",
+    )
+    parser.add_argument(
+        "--translation-api-key",
+        default=None,
+        help="覆盖翻译模型 API Key。",
+    )
+    parser.add_argument(
+        "--translation-base-url",
+        default=None,
+        help="覆盖 OpenAI-compatible 翻译接口 base_url。",
+    )
+    parser.add_argument(
+        "--translation-model",
+        default=None,
+        help="覆盖翻译模型名称。",
+    )
+    parser.add_argument(
+        "--translation-timeout",
+        type=float,
+        default=None,
+        help="覆盖翻译请求超时时间，单位秒。",
+    )
+    parser.add_argument("--source-language", default=None, help="覆盖源语言，例如 en。")
+    parser.add_argument("--target-language", default=None, help="覆盖目标语言，例如 zh-CN。")
+    parser.add_argument(
         "--log-level",
         default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -182,6 +216,12 @@ def main(argv: list[str] | None = None) -> int:
             prompt=args.asr_prompt,
         )
 
+    if args.translate_text:
+        return translate_text(
+            text=args.translate_text,
+            config=config,
+        )
+
     if args.preview_asr_stream:
         recognition = resolve_recognition_settings(args)
         return preview_asr_stream(
@@ -218,9 +258,17 @@ def resolve_recognition_settings(args: argparse.Namespace) -> CliRecognitionSett
     profile = get_recognition_profile(args.recognition_mode)
     return CliRecognitionSettings(
         profile=profile,
-        min_silence_ms=args.vad_min_silence_ms or profile.min_silence_ms,
-        preroll_seconds=args.preroll_seconds or profile.preroll_seconds,
-        queue_size=args.audio_queue_size or profile.queue_size,
+        min_silence_ms=(
+            args.vad_min_silence_ms
+            if args.vad_min_silence_ms is not None
+            else profile.min_silence_ms
+        ),
+        preroll_seconds=(
+            args.preroll_seconds if args.preroll_seconds is not None else profile.preroll_seconds
+        ),
+        queue_size=(
+            args.audio_queue_size if args.audio_queue_size is not None else profile.queue_size
+        ),
     )
 
 
@@ -236,6 +284,20 @@ def apply_cli_config_overrides(config: AppConfig, args: argparse.Namespace) -> A
         updates["asr_baidu_cuid"] = args.asr_baidu_cuid
     if args.asr_timeout is not None:
         updates["asr_timeout_seconds"] = args.asr_timeout
+    if args.translation_provider:
+        updates["translation_provider"] = args.translation_provider
+    if args.translation_api_key:
+        updates["translation_api_key"] = args.translation_api_key
+    if args.translation_base_url:
+        updates["translation_base_url"] = args.translation_base_url
+    if args.translation_model:
+        updates["translation_model"] = args.translation_model
+    if args.translation_timeout is not None:
+        updates["translation_timeout_seconds"] = args.translation_timeout
+    if args.source_language:
+        updates["source_language"] = args.source_language
+    if args.target_language:
+        updates["target_language"] = args.target_language
     if not updates:
         return config
     return replace(config, **updates)
@@ -318,6 +380,27 @@ def transcribe_audio_file(
         return 2
 
     print_asr_result(result)
+    return 0
+
+
+def translate_text(text: str, config: AppConfig) -> int:
+    try:
+        translator = create_translator_client(config)
+        result = translator.translate(
+            TranslationRequest(
+                source_text=text,
+                source_language=config.source_language,
+                target_language=config.target_language,
+            )
+        )
+    except TranslationError as exc:
+        print(f"翻译失败：{exc}", file=sys.stderr)
+        return 2
+
+    print(f"翻译提供方：{result.provider}")
+    print(f"模型：{result.model}")
+    print(f"语言：{result.source_language} -> {result.target_language}")
+    print(f"译文：{result.text if result.has_text else '（空结果）'}")
     return 0
 
 
