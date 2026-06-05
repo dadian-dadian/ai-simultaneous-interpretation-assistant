@@ -23,6 +23,15 @@ class BaiduRealtimeTranscript:
     is_final: bool = False
 
 
+@dataclass(frozen=True)
+class BaiduRealtimeSessionConfig:
+    provider_name: str
+    language: str
+    sample_rate: int
+    frame_ms: int
+    timeout_seconds: float
+
+
 class BaiduRealtimeAsrClient:
     provider_name = "baidu-realtime"
 
@@ -62,38 +71,24 @@ class BaiduRealtimeAsrClient:
         if audio.sample_rate != 16000:
             raise AsrError("百度实时 ASR WebSocket 固定要求 16000Hz PCM 音频。")
 
-        dev_pid = resolve_baidu_dev_pid(language=language, configured=self.dev_pid)
-        pcm_payload = _to_mono_pcm16(audio.samples)
-        transcripts = self._recognize_pcm(
-            pcm_payload=pcm_payload,
-            sample_rate=audio.sample_rate,
-            dev_pid=dev_pid,
-        )
-        final_segments = tuple(
-            AsrTextSegment(
-                text=item.text,
-                start_seconds=item.start_seconds,
-                end_seconds=item.end_seconds,
-            )
-            for item in transcripts
-            if item.is_final and item.text
-        )
-        text = "".join(segment.text for segment in final_segments).strip()
-        return AsrResult(
-            text=text,
-            language=language,
-            provider=self.provider_name,
-            duration_seconds=audio.duration_seconds,
-            segments=final_segments,
-        )
+        session = self.start_stream(language=language, prompt=prompt, sample_rate=audio.sample_rate)
+        try:
+            session.send_audio(audio)
+            return session.finish(duration_seconds=audio.duration_seconds)
+        except Exception:
+            session.close()
+            raise
 
-    def _recognize_pcm(
+    def start_stream(
         self,
         *,
-        pcm_payload: bytes,
-        sample_rate: int,
-        dev_pid: int,
-    ) -> list[BaiduRealtimeTranscript]:
+        language: str = "en",
+        prompt: str = "",
+        sample_rate: int = 16000,
+    ) -> BaiduRealtimeAsrSession:
+        if sample_rate != 16000:
+            raise AsrError("百度实时 ASR WebSocket 固定要求 16000Hz PCM 音频。")
+
         sn = str(uuid.uuid4())
         try:
             connection = websocket.create_connection(
@@ -103,7 +98,6 @@ class BaiduRealtimeAsrClient:
         except websocket.WebSocketException as exc:
             raise AsrError(f"无法连接百度实时 ASR WebSocket：{exc}") from exc
 
-        transcripts: list[BaiduRealtimeTranscript] = []
         try:
             connection.send(
                 json.dumps(
@@ -112,7 +106,10 @@ class BaiduRealtimeAsrClient:
                         "data": {
                             "appid": _parse_app_id(self.app_id),
                             "appkey": self.app_key,
-                            "dev_pid": dev_pid,
+                            "dev_pid": resolve_baidu_dev_pid(
+                                language=language,
+                                configured=self.dev_pid,
+                            ),
                             "cuid": self.cuid,
                             "format": "pcm",
                             "sample": sample_rate,
@@ -121,31 +118,123 @@ class BaiduRealtimeAsrClient:
                     ensure_ascii=False,
                 )
             )
-            for frame in _split_pcm_frames(
-                pcm_payload,
+        except websocket.WebSocketException as exc:
+            connection.close()
+            raise AsrError(f"百度实时 ASR WebSocket START 发送失败：{exc}") from exc
+
+        return BaiduRealtimeAsrSession(
+            connection=connection,
+            config=BaiduRealtimeSessionConfig(
+                provider_name=self.provider_name,
+                language=language,
                 sample_rate=sample_rate,
                 frame_ms=BAIDU_AUDIO_FRAME_MS,
-            ):
-                connection.send_binary(frame)
-            connection.send(json.dumps({"type": "FINISH"}))
-            transcripts.extend(self._receive_transcripts(connection))
-        except websocket.WebSocketException as exc:
-            raise AsrError(f"百度实时 ASR WebSocket 连接异常：{exc}") from exc
-        finally:
-            connection.close()
-        return transcripts
+                timeout_seconds=self.timeout_seconds,
+            ),
+        )
 
-    def _receive_transcripts(self, connection) -> list[BaiduRealtimeTranscript]:
-        transcripts: list[BaiduRealtimeTranscript] = []
+
+class BaiduRealtimeAsrSession:
+    def __init__(
+        self,
+        *,
+        connection,
+        config: BaiduRealtimeSessionConfig,
+    ) -> None:
+        self.connection = connection
+        self.config = config
+        self._pending_pcm = b""
+        self._transcripts: list[BaiduRealtimeTranscript] = []
+        self._closed = False
+        self._frame_bytes = int(config.sample_rate * 2 * config.frame_ms / 1000)
+        if self._frame_bytes <= 0:
+            raise ValueError("frame_ms is too small")
+
+    def send_audio(self, audio: AudioChunk) -> list[BaiduRealtimeTranscript]:
+        if self._closed:
+            raise AsrError("百度实时 ASR WebSocket 会话已经关闭。")
+        if audio.sample_rate != self.config.sample_rate:
+            raise AsrError("音频采样率与百度实时 ASR 会话采样率不一致。")
+
+        return self.send_pcm(_to_mono_pcm16(audio.samples))
+
+    def send_pcm(self, pcm_payload: bytes) -> list[BaiduRealtimeTranscript]:
+        if self._closed:
+            raise AsrError("百度实时 ASR WebSocket 会话已经关闭。")
+
+        self._pending_pcm += pcm_payload
+        events: list[BaiduRealtimeTranscript] = []
+        while len(self._pending_pcm) >= self._frame_bytes:
+            frame = self._pending_pcm[: self._frame_bytes]
+            self._pending_pcm = self._pending_pcm[self._frame_bytes :]
+            try:
+                self.connection.send_binary(frame)
+            except websocket.WebSocketException as exc:
+                raise AsrError(f"百度实时 ASR WebSocket 音频发送失败：{exc}") from exc
+            events.extend(self._receive_transcripts(block=False))
+        return events
+
+    def finish(self, duration_seconds: float) -> AsrResult:
+        if self._closed:
+            return self._build_result(duration_seconds)
+
+        try:
+            if self._pending_pcm:
+                self.connection.send_binary(self._pending_pcm)
+                self._pending_pcm = b""
+            self.connection.send(json.dumps({"type": "FINISH"}))
+            self._receive_transcripts(block=True)
+        except websocket.WebSocketException as exc:
+            raise AsrError(f"百度实时 ASR WebSocket 结束失败：{exc}") from exc
+        finally:
+            self.close()
+        return self._build_result(duration_seconds)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.connection.close()
+
+    def _build_result(self, duration_seconds: float) -> AsrResult:
+        final_segments = tuple(
+            AsrTextSegment(
+                text=item.text,
+                start_seconds=item.start_seconds,
+                end_seconds=item.end_seconds,
+            )
+            for item in self._transcripts
+            if item.is_final and item.text
+        )
+        text = "".join(segment.text for segment in final_segments).strip()
+        return AsrResult(
+            text=text,
+            language=self.config.language,
+            provider=self.config.provider_name,
+            duration_seconds=duration_seconds,
+            segments=final_segments,
+        )
+
+    def _receive_transcripts(self, *, block: bool) -> list[BaiduRealtimeTranscript]:
+        events: list[BaiduRealtimeTranscript] = []
+        self.connection.settimeout(self.config.timeout_seconds if block else 0.001)
         while True:
             try:
-                message = connection.recv()
+                message = self.connection.recv()
             except websocket.WebSocketConnectionClosedException:
                 break
             except websocket.WebSocketTimeoutException:
-                if transcripts:
+                if block and not self._transcripts:
+                    raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。") from None
+                break
+            except TimeoutError:
+                if block and not self._transcripts:
+                    raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。") from None
+                break
+            except OSError:
+                if not block:
                     break
-                raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。") from None
+                raise
 
             if message in {"", b""}:
                 break
@@ -167,18 +256,20 @@ class BaiduRealtimeAsrClient:
 
             result = str(payload.get("result", "")).strip()
             if response_type == "MID_TEXT":
-                transcripts.append(BaiduRealtimeTranscript(text=result, is_final=False))
+                event = BaiduRealtimeTranscript(text=result, is_final=False)
+                events.append(event)
+                self._transcripts.append(event)
             elif response_type == "FIN_TEXT":
-                transcripts.append(
-                    BaiduRealtimeTranscript(
-                        text=result,
-                        start_seconds=_milliseconds_to_seconds(payload.get("start_time")),
-                        end_seconds=_milliseconds_to_seconds(payload.get("end_time")),
-                        is_final=True,
-                    )
+                event = BaiduRealtimeTranscript(
+                    text=result,
+                    start_seconds=_milliseconds_to_seconds(payload.get("start_time")),
+                    end_seconds=_milliseconds_to_seconds(payload.get("end_time")),
+                    is_final=True,
                 )
+                events.append(event)
+                self._transcripts.append(event)
 
-        return transcripts
+        return events
 
 
 def resolve_baidu_dev_pid(*, language: str, configured: str) -> int:

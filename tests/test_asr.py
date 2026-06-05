@@ -22,6 +22,7 @@ class FakeWebSocket:
         self.text_frames: list[str] = []
         self.binary_frames: list[bytes] = []
         self.closed = False
+        self.timeout = None
 
     def send(self, payload: str) -> None:
         self.text_frames.append(payload)
@@ -36,6 +37,9 @@ class FakeWebSocket:
 
     def close(self) -> None:
         self.closed = True
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
 
 
 class MockAsrClientTest(unittest.TestCase):
@@ -82,6 +86,24 @@ class BaiduRealtimeAsrClientTest(unittest.TestCase):
         self.assertEqual(result.text, "hello world")
         self.assertEqual(result.segments[0].start_seconds, 0.0)
         self.assertEqual(result.segments[0].end_seconds, 1.0)
+
+    def test_stream_session_sends_audio_before_finish(self) -> None:
+        audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
+        fake_ws = FakeWebSocket(messages=['{"type":"FIN_TEXT","err_no":0,"result":"hello"}'])
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
+
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            session = client.start_stream(language="en")
+            session.send_audio(audio)
+
+            self.assertEqual(json.loads(fake_ws.text_frames[0])["type"], "START")
+            self.assertGreater(len(fake_ws.binary_frames), 0)
+            self.assertNotIn("FINISH", [json.loads(frame)["type"] for frame in fake_ws.text_frames])
+
+            result = session.finish(duration_seconds=1.0)
+
+        self.assertEqual(json.loads(fake_ws.text_frames[-1])["type"], "FINISH")
+        self.assertEqual(result.text, "hello")
 
     def test_client_raises_clear_error_for_start_failure(self) -> None:
         audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)

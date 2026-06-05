@@ -230,10 +230,10 @@ uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav
 播放一段包含英文人声的视频后执行：
 
 ```powershell
-uv run python -m app --preview-asr-stream --stream-duration 10 --chunk-duration 0.25 --asr-provider mock
+uv run python -m app --preview-asr-stream --stream-duration 10 --chunk-duration 0.16 --asr-provider mock
 ```
 
-命令会捕获系统音频，通过 Silero VAD 切分语音段，并在每个 `speech_end` 后调用 ASR。mock 模式适合验证实时链路；配置百度实时 ASR WebSocket 后，可用同一命令测试实际识别效果。
+命令会捕获系统音频，通过 Silero VAD 判断语音开始和结束。对支持流式的百度实时 ASR WebSocket，程序会在 `speech_start` 后立即建立会话，并随着系统音频持续发送 160ms PCM 音频帧；在 `speech_end` 后发送 `FINISH` 并输出最终识别结果。mock 模式适合验证基础链路；配置百度实时 ASR WebSocket 后，可用同一命令测试实际识别效果。
 
 ### 启动无 UI 骨架
 

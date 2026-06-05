@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--chunk-duration",
         type=float,
-        default=0.5,
+        default=0.16,
         help="音频流 chunk 时长，单位秒。",
     )
     parser.add_argument(
@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--asr-provider",
         default=None,
-        help="覆盖 ASR 提供方，例如 mock 或 baidu-cloud。",
+        help="覆盖 ASR 提供方，例如 mock 或 baidu-realtime。",
     )
     parser.add_argument(
         "--asr-baidu-ws-url",
@@ -285,6 +285,9 @@ def preview_asr_stream(
 
     started_at = time.monotonic()
     chunk_count = 0
+    stream_session = None
+    stream_duration_seconds = 0.0
+    last_partial_text = ""
     print("开始预览系统音频 VAD + ASR。")
     print(
         f"时长 {duration_seconds:.1f}s，chunk {chunk_duration_seconds:.2f}s，"
@@ -296,25 +299,81 @@ def preview_asr_stream(
         buffer.append(chunk)
         events = segmenter.accept_chunk(chunk)
         elapsed = time.monotonic() - started_at
+        current_chunk_sent = False
+        speech_end_event = None
         for event in events:
             if event.type == VadEventType.SPEECH_START:
                 print(f"{elapsed:6.2f}s speech_start p={event.speech_probability:.3f}")
+                if supports_streaming_asr(client):
+                    try:
+                        stream_session = client.start_stream(language=language, prompt=prompt)
+                        preroll = buffer.recent(duration_seconds=0.5)
+                        stream_events = stream_session.send_audio(preroll)
+                    except AsrError as exc:
+                        print(f"{elapsed:6.2f}s ASR 流式识别启动失败：{exc}", file=sys.stderr)
+                        return 2
+                    stream_duration_seconds = preroll.duration_seconds
+                    current_chunk_sent = True
+                    last_partial_text = print_asr_stream_events(
+                        stream_events,
+                        prefix=f"{elapsed:6.2f}s",
+                        last_partial_text=last_partial_text,
+                    )
             elif event.segment is not None:
-                if not transcribe_segment(
-                    client=client,
-                    segment=event.segment.to_audio_chunk(),
-                    language=language,
-                    prompt=prompt,
-                    prefix=f"{elapsed:6.2f}s",
-                ):
+                speech_end_event = event
+
+        if stream_session is not None and not current_chunk_sent:
+            try:
+                stream_events = stream_session.send_audio(chunk)
+            except AsrError as exc:
+                print(f"{elapsed:6.2f}s ASR 流式音频发送失败：{exc}", file=sys.stderr)
+                return 2
+            stream_duration_seconds += chunk.duration_seconds
+            last_partial_text = print_asr_stream_events(
+                stream_events,
+                prefix=f"{elapsed:6.2f}s",
+                last_partial_text=last_partial_text,
+            )
+
+        if speech_end_event is not None:
+            if stream_session is not None:
+                try:
+                    result = stream_session.finish(duration_seconds=stream_duration_seconds)
+                except AsrError as exc:
+                    print(f"{elapsed:6.2f}s ASR 流式识别结束失败：{exc}", file=sys.stderr)
                     return 2
+                print(f"{elapsed:6.2f}s speech_end duration={stream_duration_seconds:.2f}s")
+                text = result.text if result.has_text else "（空结果）"
+                print(f"{elapsed:6.2f}s asr_text {text}")
+                stream_session = None
+                stream_duration_seconds = 0.0
+                last_partial_text = ""
+            elif not transcribe_segment(
+                client=client,
+                segment=speech_end_event.segment.to_audio_chunk(),
+                language=language,
+                prompt=prompt,
+                prefix=f"{elapsed:6.2f}s",
+            ):
+                return 2
 
         if elapsed >= duration_seconds:
             break
 
     for event in segmenter.flush():
         if event.segment is not None:
-            if not transcribe_segment(
+            if stream_session is not None:
+                try:
+                    result = stream_session.finish(duration_seconds=stream_duration_seconds)
+                except AsrError as exc:
+                    print(f"flush ASR 流式识别结束失败：{exc}", file=sys.stderr)
+                    return 2
+                print(f"flush speech_end duration={stream_duration_seconds:.2f}s")
+                print(f"flush asr_text {result.text if result.has_text else '（空结果）'}")
+                stream_session = None
+                stream_duration_seconds = 0.0
+                last_partial_text = ""
+            elif not transcribe_segment(
                 client=client,
                 segment=event.segment.to_audio_chunk(),
                 language=language,
@@ -325,6 +384,26 @@ def preview_asr_stream(
 
     print(f"已处理 {chunk_count} 个音频块，最近缓冲 {buffer.duration_seconds:.2f}s。")
     return 0
+
+
+def supports_streaming_asr(client: AsrClient) -> bool:
+    return callable(getattr(client, "start_stream", None))
+
+
+def print_asr_stream_events(
+    events,
+    prefix: str,
+    last_partial_text: str,
+) -> str:
+    current_partial = last_partial_text
+    for event in events:
+        if event.is_final:
+            continue
+        if not event.text or event.text == current_partial:
+            continue
+        current_partial = event.text
+        print(f"{prefix} asr_partial {event.text}")
+    return current_partial
 
 
 def transcribe_segment(
