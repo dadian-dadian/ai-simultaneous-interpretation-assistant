@@ -22,6 +22,7 @@ from app.translate import (
 )
 
 EMPTY_SPEECH_TEXT = "（未识别到清晰语音）"
+TRANSLATING_TEXT = "正在翻译..."
 
 
 class RealtimeSubtitleWorker(QObject):
@@ -246,13 +247,13 @@ class RealtimeSubtitleWorker(QObject):
     def _remember_partial_source(self, segment_id: str, source_text: str) -> str:
         with self._translation_lock:
             self._latest_source_by_segment[segment_id] = source_text
-            return self._partial_zh_by_segment.get(segment_id, source_text)
+            return self._partial_zh_by_segment.get(segment_id, TRANSLATING_TEXT)
 
     def _finalize_segment(self, segment_id: str, source_text: str) -> tuple[str, tuple[str, ...]]:
         with self._translation_lock:
             self._latest_source_by_segment[segment_id] = source_text
             self._finalized_segments.add(segment_id)
-            zh_text = self._partial_zh_by_segment.get(segment_id, source_text)
+            zh_text = self._partial_zh_by_segment.get(segment_id, TRANSLATING_TEXT)
             context = tuple(self._context_sources)
             if source_text != EMPTY_SPEECH_TEXT:
                 self._context_sources.append(source_text)
@@ -345,10 +346,11 @@ class RealtimeSubtitleWorker(QObject):
                 return
             if segment_id in self._finalized_segments:
                 return
-            if self._latest_source_by_segment.get(segment_id) != source_text:
+            latest_source = self._latest_source_by_segment.get(segment_id, "")
+            if not _is_prefix_translation_candidate(source_text, latest_source):
                 return
             self._partial_zh_by_segment[segment_id] = zh_text
-        self.subtitle_event.emit(SubtitleEvent.partial(segment_id, source_text, zh_text))
+        self.subtitle_event.emit(SubtitleEvent.partial(segment_id, latest_source, zh_text))
 
     def _handle_final_translation_result(
         self,
@@ -392,3 +394,11 @@ def supports_streaming_asr(client: AsrClient) -> bool:
 
 def _normalize_asr_text(text: str) -> str:
     return " ".join(text.strip().split())
+
+
+def _is_prefix_translation_candidate(translated_source: str, latest_source: str) -> bool:
+    normalized_translated_source = _normalize_asr_text(translated_source).lower()
+    normalized_latest_source = _normalize_asr_text(latest_source).lower()
+    if not normalized_translated_source or not normalized_latest_source:
+        return False
+    return normalized_latest_source.startswith(normalized_translated_source)

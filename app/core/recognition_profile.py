@@ -37,9 +37,9 @@ RECOGNITION_PROFILES: dict[RecognitionMode, RecognitionProfile] = {
         min_silence_ms=500,
         preroll_seconds=0.6,
         queue_size=32,
-        partial_translation_debounce_seconds=0.6,
+        partial_translation_debounce_seconds=0.35,
         final_context_sentences=2,
-        min_partial_delta_chars=10,
+        min_partial_delta_chars=8,
     ),
     "balanced": RecognitionProfile(
         mode="balanced",
@@ -47,9 +47,9 @@ RECOGNITION_PROFILES: dict[RecognitionMode, RecognitionProfile] = {
         min_silence_ms=800,
         preroll_seconds=0.8,
         queue_size=32,
-        partial_translation_debounce_seconds=0.8,
+        partial_translation_debounce_seconds=0.5,
         final_context_sentences=3,
-        min_partial_delta_chars=12,
+        min_partial_delta_chars=10,
     ),
     "high-accuracy": RecognitionProfile(
         mode="high-accuracy",
@@ -57,9 +57,9 @@ RECOGNITION_PROFILES: dict[RecognitionMode, RecognitionProfile] = {
         min_silence_ms=1100,
         preroll_seconds=1.0,
         queue_size=64,
-        partial_translation_debounce_seconds=1.0,
+        partial_translation_debounce_seconds=0.8,
         final_context_sentences=4,
-        min_partial_delta_chars=16,
+        min_partial_delta_chars=12,
     ),
 }
 
