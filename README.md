@@ -30,7 +30,7 @@ MVP 阶段优先使用 Python 快速验证核心链路：
 - 桌面界面：PySide6 / Qt Quick
 - 系统声音采集：Windows WASAPI Loopback
 - 音频处理：持续音频流、环形缓冲、Silero VAD 分段和滑动窗口缓存
-- 语音识别：mock ASR 与 OpenAI 兼容 ASR HTTP 适配器
+- 语音识别：mock ASR 与百度智能云短语音识别标准版 HTTP 适配器
 - 中文翻译：大模型翻译接口
 - 字幕修正：基于上下文的字幕段回写机制
 - 打包发布：PyInstaller
@@ -113,7 +113,7 @@ tests/
 
 项目内置 `assets/models/silero_vad.onnx`，来源为 Silero VAD 官方仓库。当前 VAD 路线只使用 ONNX Runtime，不引入 PyTorch / torchaudio。
 
-ASR 真实服务通过 Python 标准库 `urllib` 调用 OpenAI 兼容的 HTTP 转写接口，目前未额外引入 HTTP 第三方库。mock ASR 为本项目自研演示适配器，用于没有 API Key 时验证音频段到原文文本的链路。
+ASR 真实服务通过 Python 标准库 `urllib` 调用百度智能云短语音识别标准版接口，目前未额外引入 HTTP 第三方库。mock ASR 为本项目自研演示适配器，用于没有 API Key 时验证音频段到原文文本的链路。
 
 依赖版本通过 `pyproject.toml` 和 `uv.lock` 管理，确保后续评审时可以复现相同环境。后续每次新增第三方库或框架时，将同步更新 README，说明依赖用途和原创功能边界。
 
@@ -191,22 +191,31 @@ uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav --asr
 
 mock 模式不会调用外部服务，会输出固定英文识别文本，用于验证“音频文件 -> ASR 结果”的程序链路。
 
-如需调用真实 ASR 服务，可配置 OpenAI 兼容接口：
+如需调用真实 ASR 服务，可配置百度智能云短语音识别标准版接口：
 
 ```powershell
-$env:ASR_PROVIDER="openai-compatible"
-$env:ASR_API_KEY="你的 API Key"
-$env:ASR_MODEL="gpt-4o-mini-transcribe"
-$env:ASR_BASE_URL="https://api.openai.com/v1"
+$env:ASR_PROVIDER="baidu-cloud"
+$env:ASR_API_KEY="你的百度 API Key"
+$env:ASR_SECRET_KEY="你的百度 Secret Key"
+uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav
+```
+
+如果已经有可用的百度 `access_token`，也可以直接配置：
+
+```powershell
+$env:ASR_PROVIDER="baidu-cloud"
+$env:ASR_ACCESS_TOKEN="你的百度 access_token"
 uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav
 ```
 
 可选参数：
 
-- `ASR_RESPONSE_FORMAT`：默认 `json`，也可按兼容服务能力设置为 `text` 或 `verbose_json`。
+- `ASR_BAIDU_ENDPOINT`：默认 `http://vop.baidu.com/server_api`。
+- `ASR_BAIDU_DEV_PID`：默认 `auto`。当识别语言是 `en` 时自动使用英语模型 `1737`，中文默认使用普通话模型 `1537`。
+- `ASR_BAIDU_CUID`：默认 `ai_interpreter_windows`，用于标识本机客户端。
 - `ASR_TIMEOUT_SECONDS`：默认 `30`。
 - `--asr-language en`：指定识别语言，默认读取 `SOURCE_LANGUAGE`。
-- `--asr-prompt "technical conference"`：向 ASR 提供场景提示词。
+- `--asr-prompt "technical conference"`：预留给支持提示词的 ASR 适配器，当前百度云适配器不使用该参数。
 
 ### 预览系统音频 ASR 分段
 
@@ -216,7 +225,7 @@ uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav
 uv run python -m app --preview-asr-stream --stream-duration 10 --chunk-duration 0.25 --asr-provider mock
 ```
 
-命令会捕获系统音频，通过 Silero VAD 切分语音段，并在每个 `speech_end` 后调用 ASR。mock 模式适合验证实时链路；配置真实 ASR 后，可用同一命令测试实际识别效果。
+命令会捕获系统音频，通过 Silero VAD 切分语音段，并在每个 `speech_end` 后调用 ASR。mock 模式适合验证实时链路；配置百度云 ASR 后，可用同一命令测试实际识别效果。
 
 ### 启动无 UI 骨架
 

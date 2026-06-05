@@ -79,15 +79,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--asr-provider",
         default=None,
-        help="覆盖 ASR 提供方，例如 mock 或 openai-compatible。",
+        help="覆盖 ASR 提供方，例如 mock 或 baidu-cloud。",
     )
-    parser.add_argument("--asr-base-url", default=None, help="覆盖真实 ASR 服务基础地址。")
-    parser.add_argument("--asr-model", default=None, help="覆盖真实 ASR 模型名称。")
     parser.add_argument(
-        "--asr-response-format",
+        "--asr-baidu-endpoint",
         default=None,
-        choices=["json", "text", "verbose_json"],
-        help="覆盖 ASR 返回格式。",
+        help="覆盖百度云 ASR 识别接口地址。",
+    )
+    parser.add_argument(
+        "--asr-baidu-dev-pid",
+        default=None,
+        help="覆盖百度云 ASR 模型 dev_pid，默认按语言自动选择。",
+    )
+    parser.add_argument(
+        "--asr-baidu-cuid",
+        default=None,
+        help="覆盖百度云 ASR cuid。",
     )
     parser.add_argument(
         "--asr-timeout",
@@ -179,12 +186,12 @@ def apply_cli_config_overrides(config: AppConfig, args: argparse.Namespace) -> A
     updates: dict[str, object] = {}
     if args.asr_provider:
         updates["asr_provider"] = args.asr_provider
-    if args.asr_base_url:
-        updates["asr_base_url"] = args.asr_base_url
-    if args.asr_model:
-        updates["asr_model"] = args.asr_model
-    if args.asr_response_format:
-        updates["asr_response_format"] = args.asr_response_format
+    if args.asr_baidu_endpoint:
+        updates["asr_baidu_endpoint"] = args.asr_baidu_endpoint
+    if args.asr_baidu_dev_pid:
+        updates["asr_baidu_dev_pid"] = args.asr_baidu_dev_pid
+    if args.asr_baidu_cuid:
+        updates["asr_baidu_cuid"] = args.asr_baidu_cuid
     if args.asr_timeout is not None:
         updates["asr_timeout_seconds"] = args.asr_timeout
     if not updates:

@@ -1,6 +1,6 @@
+from app.asr.baidu import BaiduCloudAsrClient
 from app.asr.factory import create_asr_client
 from app.asr.mock import MockAsrClient
-from app.asr.openai_compatible import OpenAICompatibleAsrClient
 from app.asr.types import (
     AsrClient,
     AsrConfigurationError,
@@ -15,7 +15,7 @@ __all__ = [
     "AsrError",
     "AsrResult",
     "AsrTextSegment",
+    "BaiduCloudAsrClient",
     "MockAsrClient",
-    "OpenAICompatibleAsrClient",
     "create_asr_client",
 ]
