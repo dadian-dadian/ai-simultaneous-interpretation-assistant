@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 
 from app import __version__
 from app.core.config import AppConfig
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="覆盖日志级别。",
     )
+    parser.add_argument("--no-ui", action="store_true", help="仅启动命令行骨架，不打开桌面窗口。")
     return parser
 
 
@@ -44,11 +46,26 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(config.to_safe_dict(), ensure_ascii=False, indent=2))
         return 0
 
+    if not args.no_ui:
+        return launch_desktop_app(config)
+
     logger.info("AI 同声传译助手启动中")
     logger.info("当前 ASR 提供方：%s", config.asr_provider)
     logger.info("当前翻译提供方：%s", config.translation_provider)
-    logger.info("桌面 UI 和音频采集模块将在后续 PR 中接入")
+    logger.info("已使用 --no-ui 跳过桌面窗口")
     return 0
+
+
+def launch_desktop_app(config: AppConfig) -> int:
+    try:
+        from app.ui.main_window import run_main_window
+    except ModuleNotFoundError as exc:
+        if exc.name != "PySide6":
+            raise
+        print("缺少 PySide6 依赖，请先执行：uv sync", file=sys.stderr)
+        return 2
+
+    return run_main_window(config)
 
 
 if __name__ == "__main__":
