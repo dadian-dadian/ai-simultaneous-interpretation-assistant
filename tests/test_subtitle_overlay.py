@@ -3,6 +3,7 @@ import unittest
 from PySide6.QtWidgets import QApplication
 
 from app.core.config import AppConfig
+from app.core.subtitle import SubtitleSegmentStatus
 from app.ui.main_window import MainWindow
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
 
@@ -65,6 +66,19 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
 
         window._hide_overlay()
         self.assertFalse(window.overlay.isVisible())
+
+    def test_main_window_advances_demo_stream_once(self) -> None:
+        window = MainWindow(AppConfig())
+
+        window._advance_demo_stream()
+        window.demo_timer.stop()
+
+        segment = window.subtitle_state.get("seg_001")
+        self.assertIsNotNone(segment)
+        assert segment is not None
+        self.assertEqual(segment.status, SubtitleSegmentStatus.PARTIAL)
+        self.assertIn("Transformer", window.translation_caption_label.text())
+        self.assertEqual(window.history_list.count(), 1)
 
 
 if __name__ == "__main__":
