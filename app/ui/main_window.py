@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.config import AppConfig
+from app.core.demo_stream import DemoSubtitleScript, build_default_demo_script
+from app.core.subtitle import SubtitleEvent, SubtitleSegment, SubtitleSegmentStatus, SubtitleState
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
 from app.ui.theme import apply_app_theme
 
@@ -31,11 +33,26 @@ class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
         self.config = config
+        self.subtitle_state = SubtitleState()
+        self.demo_script: DemoSubtitleScript = build_default_demo_script()
+        self.demo_step_index = 0
+        self.demo_timer = QTimer(self)
+        self.demo_timer.setSingleShot(True)
+        self.demo_timer.timeout.connect(self._advance_demo_stream)
+
         self.overlay = SubtitleOverlayWindow()
+        self.status_label: QLabel | None = None
+        self.start_button: QPushButton | None = None
+        self.pause_button: QPushButton | None = None
+        self.stop_button: QPushButton | None = None
         self.overlay_toggle: QPushButton | None = None
         self.font_size_slider: QSlider | None = None
         self.opacity_slider: QSlider | None = None
         self.display_mode_combo: QComboBox | None = None
+        self.source_caption_label: QLabel | None = None
+        self.translation_caption_label: QLabel | None = None
+        self.correction_hint_label: QLabel | None = None
+        self.history_list: QListWidget | None = None
 
         self.setWindowTitle("AI 同声传译助手")
         self.setMinimumSize(1120, 720)
@@ -76,6 +93,7 @@ class MainWindow(QMainWindow):
         status.setObjectName("StatusBadge")
         status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         status.setFixedSize(72, 32)
+        self.status_label = status
 
         layout.addLayout(title_block, stretch=1)
         layout.addWidget(status)
@@ -118,21 +136,25 @@ class MainWindow(QMainWindow):
         start = QPushButton("开始")
         start.setObjectName("PrimaryButton")
         start.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.start_button = start
 
         pause = QPushButton("暂停")
         pause.setObjectName("GhostButton")
         pause.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+        self.pause_button = pause
 
         stop = QPushButton("停止")
         stop.setObjectName("GhostButton")
         stop.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        self.stop_button = stop
 
         for button in (start, pause, stop):
             button.setMinimumHeight(42)
             controls.addWidget(button)
 
-        start.clicked.connect(self._show_overlay)
-        stop.clicked.connect(self._hide_overlay)
+        start.clicked.connect(self._start_demo_stream)
+        pause.clicked.connect(self._pause_demo_stream)
+        stop.clicked.connect(self._stop_demo_stream)
 
         self.overlay_toggle = QPushButton("悬浮字幕")
         self.overlay_toggle.setObjectName("GhostButton")
@@ -158,17 +180,20 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(10)
 
-        source = QLabel("Today we are going to talk about transformer models and inference latency.")
+        source = QLabel("等待模拟字幕流启动。")
         source.setObjectName("SourceCaption")
         source.setWordWrap(True)
+        self.source_caption_label = source
 
-        translation = QLabel("今天我们将讨论 Transformer 模型与推理延迟。")
+        translation = QLabel("点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。")
         translation.setObjectName("TranslatedCaption")
         translation.setWordWrap(True)
+        self.translation_caption_label = translation
 
-        correction = QLabel("术语已统一：inference latency → 推理延迟")
+        correction = QLabel("演示模式：使用内置技术分享字幕脚本，不调用外部 AI 服务。")
         correction.setObjectName("CorrectionHint")
         correction.setWordWrap(True)
+        self.correction_hint_label = correction
 
         layout.addWidget(source)
         layout.addWidget(translation)
@@ -179,16 +204,8 @@ class MainWindow(QMainWindow):
     def _build_history_list(self) -> QListWidget:
         history = QListWidget()
         history.setObjectName("HistoryList")
-        samples = [
-            ("final", "The model uses attention to align tokens.", "该模型使用注意力机制对齐 token。"),
-            ("updated", "AI agents can use tools automatically.", "AI 智能体可以自动使用工具。"),
-            ("partial", "We need to reduce latency without losing context.", "我们需要在不丢失上下文的情况下降低延迟……"),
-        ]
-
-        for state, source, translation in samples:
-            item = QListWidgetItem(f"{state.upper()}  {translation}\n{source}")
-            item.setSizeHint(item.sizeHint().expandedTo(item.sizeHint()))
-            history.addItem(item)
+        history.addItem("点击“开始”查看模拟字幕历史。")
+        self.history_list = history
 
         return history
 
@@ -359,7 +376,111 @@ class MainWindow(QMainWindow):
         }.get(index, "bilingual")
         self.overlay.set_display_mode(mode)
 
+    def _start_demo_stream(self) -> None:
+        if self.demo_step_index >= len(self.demo_script):
+            self._reset_demo_state()
+        self._show_overlay()
+        self._set_status("演示中")
+        self._advance_demo_stream()
+
+    def _pause_demo_stream(self) -> None:
+        if self.demo_timer.isActive():
+            self.demo_timer.stop()
+            self._set_status("暂停")
+            return
+        if 0 < self.demo_step_index < len(self.demo_script):
+            self._set_status("演示中")
+            self._schedule_next_demo_step()
+
+    def _stop_demo_stream(self) -> None:
+        self.demo_timer.stop()
+        self._hide_overlay()
+        self._reset_demo_state()
+        self._set_status("待机")
+
+    def _advance_demo_stream(self) -> None:
+        if self.demo_step_index >= len(self.demo_script):
+            self._set_status("完成")
+            return
+
+        step = self.demo_script[self.demo_step_index]
+        segment = self.subtitle_state.apply(step.event)
+        self._render_subtitle_event(step.event, segment)
+        self.demo_step_index += 1
+
+        if self.demo_step_index < len(self.demo_script):
+            self._schedule_next_demo_step()
+        else:
+            self._set_status("完成")
+
+    def _schedule_next_demo_step(self) -> None:
+        step = self.demo_script[self.demo_step_index]
+        self.demo_timer.start(step.delay_ms)
+
+    def _render_subtitle_event(self, event: SubtitleEvent, segment: SubtitleSegment) -> None:
+        if self.source_caption_label is not None:
+            self.source_caption_label.setText(segment.source_text)
+        if self.translation_caption_label is not None:
+            self.translation_caption_label.setText(segment.zh_text)
+        if self.correction_hint_label is not None:
+            self.correction_hint_label.setText(self._build_event_hint(event, segment))
+
+        self.overlay.set_caption(
+            source_text=segment.source_text,
+            zh_text=segment.zh_text,
+            state=segment.status.value,
+        )
+        self._render_history()
+
+    def _render_history(self) -> None:
+        if self.history_list is None:
+            return
+
+        self.history_list.clear()
+        for segment in self.subtitle_state.segments():
+            item = QListWidgetItem(self._format_history_item(segment))
+            item.setData(Qt.ItemDataRole.UserRole, segment.segment_id)
+            self.history_list.addItem(item)
+        self.history_list.scrollToBottom()
+
+    def _build_event_hint(self, event: SubtitleEvent, segment: SubtitleSegment) -> str:
+        if segment.status == SubtitleSegmentStatus.UPDATED:
+            reason = event.reason or "context_correction"
+            return f"已修正：{reason}"
+        if segment.status == SubtitleSegmentStatus.FINAL:
+            return "正式字幕：当前语音段已稳定。"
+        return "临时字幕：优先保证低延迟，后续上下文可能回写修正。"
+
+    def _format_history_item(self, segment: SubtitleSegment) -> str:
+        state_label = {
+            SubtitleSegmentStatus.PARTIAL: "实时",
+            SubtitleSegmentStatus.FINAL: "确认",
+            SubtitleSegmentStatus.UPDATED: "修正",
+        }[segment.status]
+        revision_marker = " · 已回写" if segment.revisions else ""
+        return f"{state_label}{revision_marker}  {segment.zh_text}\n{segment.source_text}"
+
+    def _reset_demo_state(self) -> None:
+        self.subtitle_state = SubtitleState()
+        self.demo_script = build_default_demo_script()
+        self.demo_step_index = 0
+        if self.source_caption_label is not None:
+            self.source_caption_label.setText("等待模拟字幕流启动。")
+        if self.translation_caption_label is not None:
+            self.translation_caption_label.setText("点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。")
+        if self.correction_hint_label is not None:
+            self.correction_hint_label.setText("演示模式：使用内置技术分享字幕脚本，不调用外部 AI 服务。")
+        if self.history_list is not None:
+            self.history_list.clear()
+            self.history_list.addItem("点击“开始”查看模拟字幕历史。")
+        self.overlay.set_sample_caption()
+
+    def _set_status(self, status: str) -> None:
+        if self.status_label is not None:
+            self.status_label.setText(status)
+
     def closeEvent(self, event) -> None:  # noqa: ANN001
+        self.demo_timer.stop()
         self.overlay.close()
         super().closeEvent(event)
 
