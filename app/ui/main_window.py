@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.config import AppConfig
+from app.ui.subtitle_overlay import SubtitleOverlayWindow
 from app.ui.theme import apply_app_theme
 
 
@@ -30,6 +31,11 @@ class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
         self.config = config
+        self.overlay = SubtitleOverlayWindow()
+        self.overlay_toggle: QPushButton | None = None
+        self.font_size_slider: QSlider | None = None
+        self.opacity_slider: QSlider | None = None
+        self.display_mode_combo: QComboBox | None = None
 
         self.setWindowTitle("AI 同声传译助手")
         self.setMinimumSize(1120, 720)
@@ -46,6 +52,7 @@ class MainWindow(QMainWindow):
         shell.addWidget(self._build_header())
         shell.addLayout(self._build_content(), stretch=1)
         shell.addWidget(self._build_status_bar())
+        self._sync_overlay_from_controls()
 
     def _build_header(self) -> QWidget:
         header = QFrame()
@@ -123,6 +130,16 @@ class MainWindow(QMainWindow):
         for button in (start, pause, stop):
             button.setMinimumHeight(42)
             controls.addWidget(button)
+
+        start.clicked.connect(self._show_overlay)
+        stop.clicked.connect(self._hide_overlay)
+
+        self.overlay_toggle = QPushButton("悬浮字幕")
+        self.overlay_toggle.setObjectName("GhostButton")
+        self.overlay_toggle.setCheckable(True)
+        self.overlay_toggle.setMinimumHeight(42)
+        self.overlay_toggle.clicked.connect(self._toggle_overlay)
+        controls.addWidget(self.overlay_toggle)
 
         controls.addStretch(1)
 
@@ -235,6 +252,8 @@ class MainWindow(QMainWindow):
         font_size.setObjectName("Slider")
         font_size.setRange(18, 42)
         font_size.setValue(28)
+        font_size.valueChanged.connect(self._update_overlay_font_size)
+        self.font_size_slider = font_size
 
         opacity_label = QLabel("透明度")
         opacity_label.setObjectName("FieldLabel")
@@ -242,12 +261,16 @@ class MainWindow(QMainWindow):
         opacity.setObjectName("Slider")
         opacity.setRange(40, 100)
         opacity.setValue(82)
+        opacity.valueChanged.connect(self._update_overlay_opacity)
+        self.opacity_slider = opacity
 
         mode_label = QLabel("显示")
         mode_label.setObjectName("FieldLabel")
         mode = QComboBox()
         mode.setObjectName("Input")
         mode.addItems(["双语字幕", "仅中文字幕", "仅原文字幕"])
+        mode.currentIndexChanged.connect(self._update_overlay_display_mode)
+        self.display_mode_combo = mode
 
         grid.addWidget(font_label, 0, 0)
         grid.addWidget(font_size, 0, 1)
@@ -292,6 +315,53 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         return bar
+
+    def _sync_overlay_from_controls(self) -> None:
+        if self.font_size_slider is not None:
+            self.overlay.set_font_size(self.font_size_slider.value())
+        if self.opacity_slider is not None:
+            self.overlay.set_opacity_percent(self.opacity_slider.value())
+        if self.display_mode_combo is not None:
+            self._update_overlay_display_mode(self.display_mode_combo.currentIndex())
+
+    def _show_overlay(self) -> None:
+        if not self.overlay.isVisible():
+            screen_geometry = self.screen().availableGeometry()
+            target_x = screen_geometry.center().x() - self.overlay.width() // 2
+            target_y = screen_geometry.bottom() - self.overlay.height() - 48
+            self.overlay.move(target_x, target_y)
+            self.overlay.show()
+        if self.overlay_toggle is not None:
+            self.overlay_toggle.setChecked(True)
+
+    def _hide_overlay(self) -> None:
+        self.overlay.hide()
+        if self.overlay_toggle is not None:
+            self.overlay_toggle.setChecked(False)
+
+    def _toggle_overlay(self, checked: bool) -> None:
+        if checked:
+            self._show_overlay()
+        else:
+            self._hide_overlay()
+
+    def _update_overlay_font_size(self, value: int) -> None:
+        self.overlay.set_font_size(value)
+
+    def _update_overlay_opacity(self, value: int) -> None:
+        self.overlay.set_opacity_percent(value)
+
+    def _update_overlay_display_mode(self, index: int) -> None:
+        mode = {
+            0: "bilingual",
+            1: "zh",
+            2: "source",
+        }.get(index, "bilingual")
+        self.overlay.set_display_mode(mode)
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001
+        self.overlay.close()
+        super().closeEvent(event)
 
 
 def run_main_window(config: AppConfig) -> int:

@@ -29,6 +29,12 @@ def apply_app_theme(app: QApplication) -> None:
             border-radius: 8px;
         }
 
+        QFrame#OverlayContainer {
+            background: rgba(13, 17, 23, 224);
+            border: 1px solid rgba(148, 163, 184, 92);
+            border-radius: 8px;
+        }
+
         QLabel#WindowTitle {
             color: #f8fafc;
             font-size: 26px;
@@ -81,6 +87,42 @@ def apply_app_theme(app: QApplication) -> None:
             font-size: 13px;
         }
 
+        QLabel#OverlayTranslation {
+            color: #f8fafc;
+            font-weight: 700;
+        }
+
+        QLabel#OverlaySource {
+            color: #c8d2df;
+        }
+
+        QLabel#OverlayHint {
+            color: #9aa7b6;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        QLabel#OverlayStateBadge {
+            background: rgba(45, 212, 191, 44);
+            border: 1px solid rgba(45, 212, 191, 140);
+            border-radius: 12px;
+            color: #99f6e4;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        QLabel#OverlayStateBadge[captionState="final"] {
+            background: rgba(59, 130, 246, 44);
+            border-color: rgba(96, 165, 250, 150);
+            color: #bfdbfe;
+        }
+
+        QLabel#OverlayStateBadge[captionState="updated"] {
+            background: rgba(245, 158, 11, 48);
+            border-color: rgba(245, 158, 11, 160);
+            color: #fde68a;
+        }
+
         QPushButton {
             border-radius: 8px;
             padding: 0 14px;
@@ -98,14 +140,16 @@ def apply_app_theme(app: QApplication) -> None:
         }
 
         QPushButton#GhostButton,
-        QPushButton#SegmentButton {
+        QPushButton#SegmentButton,
+        QPushButton#OverlayCloseButton {
             background: #202631;
             border: 1px solid #323a48;
             color: #d8dee8;
         }
 
         QPushButton#GhostButton:hover,
-        QPushButton#SegmentButton:hover {
+        QPushButton#SegmentButton:hover,
+        QPushButton#OverlayCloseButton:hover {
             background: #283140;
             border-color: #465568;
         }
