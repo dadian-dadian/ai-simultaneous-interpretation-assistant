@@ -1,57 +1,53 @@
 from __future__ import annotations
 
-import base64
 import json
-import urllib.error
-import urllib.parse
-import urllib.request
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import websocket
 
 from app.asr.types import AsrConfigurationError, AsrError, AsrResult, AsrTextSegment
 from app.audio.capture import AudioChunk
 
-BAIDU_STANDARD_ASR_ENDPOINT = "http://vop.baidu.com/server_api"
-BAIDU_TOKEN_ENDPOINT = "https://aip.baidubce.com/oauth/2.0/token"
+BAIDU_REALTIME_ASR_WS_URL = "wss://vop.baidu.com/realtime_asr"
+BAIDU_AUDIO_FRAME_MS = 160
 
 
 @dataclass(frozen=True)
-class BaiduAsrPayload:
-    body: bytes
-    headers: dict[str, str]
+class BaiduRealtimeTranscript:
+    text: str
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+    is_final: bool = False
 
 
-class BaiduCloudAsrClient:
-    provider_name = "baidu-cloud"
+class BaiduRealtimeAsrClient:
+    provider_name = "baidu-realtime"
 
     def __init__(
         self,
         *,
-        api_key: str = "",
-        secret_key: str = "",
-        access_token: str = "",
-        endpoint: str = BAIDU_STANDARD_ASR_ENDPOINT,
-        token_endpoint: str = BAIDU_TOKEN_ENDPOINT,
+        app_id: str = "",
+        app_key: str = "",
+        ws_url: str = BAIDU_REALTIME_ASR_WS_URL,
         cuid: str = "ai_interpreter_windows",
         dev_pid: str = "auto",
         timeout_seconds: float = 30.0,
     ) -> None:
-        if not api_key and not access_token:
-            raise AsrConfigurationError(
-                "使用百度云 ASR 时需要设置 ASR_API_KEY，或直接设置 ASR_ACCESS_TOKEN。"
-            )
-        if not endpoint:
-            raise AsrConfigurationError("ASR_BAIDU_ENDPOINT 不能为空。")
+        if not app_id:
+            raise AsrConfigurationError("使用百度实时 ASR WebSocket 时需要设置 ASR_APP_ID。")
+        if not app_key:
+            raise AsrConfigurationError("使用百度实时 ASR WebSocket 时需要设置 ASR_API_KEY。")
+        if not ws_url:
+            raise AsrConfigurationError("ASR_BAIDU_WS_URL 不能为空。")
         if timeout_seconds <= 0:
             raise AsrConfigurationError("ASR_TIMEOUT_SECONDS 必须大于 0。")
 
-        self.api_key = api_key
-        self.secret_key = secret_key
-        self._access_token = access_token
-        self.endpoint = endpoint
-        self.token_endpoint = token_endpoint
+        self.app_id = app_id
+        self.app_key = app_key
+        self.ws_url = ws_url.rstrip("?")
         self.cuid = cuid
         self.dev_pid = dev_pid
         self.timeout_seconds = timeout_seconds
@@ -64,130 +60,127 @@ class BaiduCloudAsrClient:
         prompt: str = "",
     ) -> AsrResult:
         if audio.sample_rate != 16000:
-            raise AsrError("百度短语音识别当前仅支持 16000Hz 或 8000Hz，本项目默认使用 16000Hz。")
+            raise AsrError("百度实时 ASR WebSocket 固定要求 16000Hz PCM 音频。")
 
-        pcm_payload = _to_mono_pcm16(audio.samples)
         dev_pid = resolve_baidu_dev_pid(language=language, configured=self.dev_pid)
-        payload = self._build_payload(
+        pcm_payload = _to_mono_pcm16(audio.samples)
+        transcripts = self._recognize_pcm(
             pcm_payload=pcm_payload,
             sample_rate=audio.sample_rate,
             dev_pid=dev_pid,
         )
-        response = self._post_json(payload)
-        text = _parse_baidu_result(response)
+        final_segments = tuple(
+            AsrTextSegment(
+                text=item.text,
+                start_seconds=item.start_seconds,
+                end_seconds=item.end_seconds,
+            )
+            for item in transcripts
+            if item.is_final and item.text
+        )
+        text = "".join(segment.text for segment in final_segments).strip()
         return AsrResult(
             text=text,
             language=language,
             provider=self.provider_name,
             duration_seconds=audio.duration_seconds,
-            segments=(
-                AsrTextSegment(
-                    text=text,
-                    start_seconds=0.0,
-                    end_seconds=audio.duration_seconds,
-                ),
-            )
-            if text
-            else (),
+            segments=final_segments,
         )
 
-    def _build_payload(
+    def _recognize_pcm(
         self,
         *,
         pcm_payload: bytes,
         sample_rate: int,
         dev_pid: int,
-    ) -> BaiduAsrPayload:
-        request_body: dict[str, Any] = {
-            "format": "pcm",
-            "rate": sample_rate,
-            "channel": 1,
-            "cuid": self.cuid,
-            "dev_pid": dev_pid,
-            "speech": base64.b64encode(pcm_payload).decode(),
-            "len": len(pcm_payload),
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-
-        token = self._get_access_token_if_needed()
-        if token:
-            request_body["token"] = token
-        else:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        return BaiduAsrPayload(
-            body=json.dumps(request_body, ensure_ascii=False).encode(),
-            headers=headers,
-        )
-
-    def _get_access_token_if_needed(self) -> str:
-        if self._access_token:
-            return self._access_token
-        if not self.secret_key:
-            return ""
-
-        query = urllib.parse.urlencode(
-            {
-                "grant_type": "client_credentials",
-                "client_id": self.api_key,
-                "client_secret": self.secret_key,
-            }
-        )
-        request = urllib.request.Request(
-            url=f"{self.token_endpoint}?{query}",
-            data=b"",
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
-        )
+    ) -> list[BaiduRealtimeTranscript]:
+        sn = str(uuid.uuid4())
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8", errors="replace"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace").strip()
-            raise AsrError(f"百度云 ASR token 获取失败 HTTP {exc.code}：{detail}") from exc
-        except urllib.error.URLError as exc:
-            raise AsrError(f"无法连接百度云 ASR 鉴权服务：{exc.reason}") from exc
-        except json.JSONDecodeError as exc:
-            raise AsrError("百度云 ASR token 接口返回的内容不是有效 JSON。") from exc
+            connection = websocket.create_connection(
+                f"{self.ws_url}?sn={sn}",
+                timeout=self.timeout_seconds,
+            )
+        except websocket.WebSocketException as exc:
+            raise AsrError(f"无法连接百度实时 ASR WebSocket：{exc}") from exc
 
-        token = str(data.get("access_token", "")).strip()
-        if not token:
-            error = data.get("error") or "unknown_error"
-            description = data.get("error_description") or "未返回 access_token"
-            raise AsrError(f"百度云 ASR token 获取失败：{error}，{description}")
-
-        self._access_token = token
-        return token
-
-    def _post_json(self, payload: BaiduAsrPayload) -> dict[str, Any]:
-        request = urllib.request.Request(
-            url=self.endpoint,
-            data=payload.body,
-            headers=payload.headers,
-            method="POST",
-        )
+        transcripts: list[BaiduRealtimeTranscript] = []
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                body = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace").strip()
-            raise AsrError(f"百度云 ASR 服务返回错误 HTTP {exc.code}：{detail}") from exc
-        except urllib.error.URLError as exc:
-            raise AsrError(f"无法连接百度云 ASR 服务：{exc.reason}") from exc
+            connection.send(
+                json.dumps(
+                    {
+                        "type": "START",
+                        "data": {
+                            "appid": _parse_app_id(self.app_id),
+                            "appkey": self.app_key,
+                            "dev_pid": dev_pid,
+                            "cuid": self.cuid,
+                            "format": "pcm",
+                            "sample": sample_rate,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            self._consume_start_response(connection)
+            for frame in _split_pcm_frames(
+                pcm_payload,
+                sample_rate=sample_rate,
+                frame_ms=BAIDU_AUDIO_FRAME_MS,
+            ):
+                connection.send_binary(frame)
+            connection.send(json.dumps({"type": "FINISH"}))
+            transcripts.extend(self._receive_transcripts(connection))
+        except websocket.WebSocketException as exc:
+            raise AsrError(f"百度实时 ASR WebSocket 连接异常：{exc}") from exc
+        finally:
+            connection.close()
+        return transcripts
 
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise AsrError("百度云 ASR 服务返回的内容不是有效 JSON。") from exc
-        if not isinstance(data, dict):
-            raise AsrError("百度云 ASR 服务返回的 JSON 结构不符合预期。")
-        return data
+    def _consume_start_response(self, connection) -> None:
+        response = _parse_ws_message(connection.recv())
+        response_type = response.get("type")
+        if response_type == "HEARTBEAT":
+            return
+        err_no = int(response.get("err_no", 0))
+        if err_no != 0:
+            err_msg = response.get("err_msg") or "unknown error"
+            raise AsrError(f"百度实时 ASR START 失败：err_no={err_no}，{err_msg}")
+
+    def _receive_transcripts(self, connection) -> list[BaiduRealtimeTranscript]:
+        transcripts: list[BaiduRealtimeTranscript] = []
+        while True:
+            try:
+                payload = _parse_ws_message(connection.recv())
+            except websocket.WebSocketConnectionClosedException:
+                break
+            except websocket.WebSocketTimeoutException:
+                if transcripts:
+                    break
+                raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。") from None
+
+            response_type = payload.get("type")
+            if response_type == "HEARTBEAT":
+                continue
+
+            err_no = int(payload.get("err_no", 0))
+            if err_no != 0:
+                err_msg = payload.get("err_msg") or "unknown error"
+                raise AsrError(f"百度实时 ASR 识别失败：err_no={err_no}，{err_msg}")
+
+            result = str(payload.get("result", "")).strip()
+            if response_type == "MID_TEXT":
+                transcripts.append(BaiduRealtimeTranscript(text=result, is_final=False))
+            elif response_type == "FIN_TEXT":
+                transcripts.append(
+                    BaiduRealtimeTranscript(
+                        text=result,
+                        start_seconds=_milliseconds_to_seconds(payload.get("start_time")),
+                        end_seconds=_milliseconds_to_seconds(payload.get("end_time")),
+                        is_final=True,
+                    )
+                )
+
+        return transcripts
 
 
 def resolve_baidu_dev_pid(*, language: str, configured: str) -> int:
@@ -200,26 +193,47 @@ def resolve_baidu_dev_pid(*, language: str, configured: str) -> int:
 
     lang = language.strip().lower()
     if lang in {"en", "en-us", "en-gb", "english"}:
-        return 1737
-    if lang in {"yue", "ct", "cantonese"}:
-        return 1637
-    if lang in {"sc", "sichuan", "sichuanese"}:
-        return 1837
-    return 1537
+        return 17372
+    if lang in {"yue", "ct", "cantonese", "sc", "sichuan", "sichuanese"}:
+        return 15376
+    return 15372
 
 
-def _parse_baidu_result(data: dict[str, Any]) -> str:
-    err_no = int(data.get("err_no", -1))
-    if err_no != 0:
-        err_msg = data.get("err_msg") or "unknown error"
-        sn = data.get("sn") or ""
-        suffix = f"，sn={sn}" if sn else ""
-        raise AsrError(f"百度云 ASR 识别失败：err_no={err_no}，{err_msg}{suffix}")
+def _parse_ws_message(message: str | bytes) -> dict[str, Any]:
+    if isinstance(message, bytes):
+        message = message.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError as exc:
+        raise AsrError("百度实时 ASR WebSocket 返回的内容不是有效 JSON。") from exc
+    if not isinstance(payload, dict):
+        raise AsrError("百度实时 ASR WebSocket 返回的 JSON 结构不符合预期。")
+    return payload
 
-    result = data.get("result")
-    if not isinstance(result, list) or not result:
-        return ""
-    return str(result[0]).strip()
+
+def _parse_app_id(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise AsrConfigurationError("ASR_APP_ID 必须是百度控制台中的整数 AppID。") from exc
+
+
+def _milliseconds_to_seconds(value: Any) -> float | None:
+    try:
+        return float(value) / 1000
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_pcm_frames(pcm_payload: bytes, *, sample_rate: int, frame_ms: int) -> list[bytes]:
+    bytes_per_frame = int(sample_rate * 2 * frame_ms / 1000)
+    if bytes_per_frame <= 0:
+        raise ValueError("frame_ms is too small")
+    return [
+        pcm_payload[start : start + bytes_per_frame]
+        for start in range(0, len(pcm_payload), bytes_per_frame)
+        if pcm_payload[start : start + bytes_per_frame]
+    ]
 
 
 def _to_mono_pcm16(samples: np.ndarray) -> bytes:

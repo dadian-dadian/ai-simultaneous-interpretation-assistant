@@ -3,10 +3,11 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import websocket
 
 from app.asr import (
     AsrConfigurationError,
-    BaiduCloudAsrClient,
+    BaiduRealtimeAsrClient,
     MockAsrClient,
     create_asr_client,
 )
@@ -15,18 +16,26 @@ from app.audio.capture import AudioChunk
 from app.core.config import AppConfig
 
 
-class FakeHttpResponse:
-    def __init__(self, payload: bytes) -> None:
-        self.payload = payload
+class FakeWebSocket:
+    def __init__(self, messages: list[str]) -> None:
+        self.messages = messages
+        self.text_frames: list[str] = []
+        self.binary_frames: list[bytes] = []
+        self.closed = False
 
-    def __enter__(self):
-        return self
+    def send(self, payload: str) -> None:
+        self.text_frames.append(payload)
 
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        return False
+    def send_binary(self, payload: bytes) -> None:
+        self.binary_frames.append(payload)
 
-    def read(self) -> bytes:
-        return self.payload
+    def recv(self) -> str:
+        if not self.messages:
+            raise websocket.WebSocketConnectionClosedException("closed")
+        return self.messages.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class MockAsrClientTest(unittest.TestCase):
@@ -41,65 +50,57 @@ class MockAsrClientTest(unittest.TestCase):
         self.assertEqual(result.duration_seconds, 1.0)
 
 
-class BaiduCloudAsrClientTest(unittest.TestCase):
-    def test_client_posts_baidu_json_with_api_key_header(self) -> None:
+class BaiduRealtimeAsrClientTest(unittest.TestCase):
+    def test_client_sends_start_audio_and_finish_frames(self) -> None:
         audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
-        response = FakeHttpResponse(b'{"err_no":0,"result":["hello world"],"sn":"test-sn"}')
-        client = BaiduCloudAsrClient(api_key="api-key", cuid="test-cuid")
+        fake_ws = FakeWebSocket(
+            messages=[
+                '{"type":"START","err_no":0}',
+                '{"type":"MID_TEXT","err_no":0,"result":"hello"}',
+                '{"type":"FIN_TEXT","err_no":0,"result":"hello world",'
+                '"start_time":0,"end_time":1000}',
+            ]
+        )
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key", cuid="test-cuid")
 
-        with patch("app.asr.baidu.urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws) as connect:
             result = client.transcribe(audio, language="en")
 
-        request = urlopen.call_args.args[0]
-        body = json.loads(request.data.decode())
-        self.assertEqual(request.full_url, "http://vop.baidu.com/server_api")
-        self.assertEqual(request.get_header("Authorization"), "Bearer api-key")
-        self.assertEqual(body["format"], "pcm")
-        self.assertEqual(body["rate"], 16000)
-        self.assertEqual(body["channel"], 1)
-        self.assertEqual(body["cuid"], "test-cuid")
-        self.assertEqual(body["dev_pid"], 1737)
-        self.assertGreater(body["len"], 0)
-        self.assertNotIn("token", body)
+        self.assertTrue(connect.call_args.args[0].startswith("wss://vop.baidu.com/realtime_asr?sn="))
+        start_frame = json.loads(fake_ws.text_frames[0])
+        finish_frame = json.loads(fake_ws.text_frames[-1])
+        self.assertEqual(start_frame["type"], "START")
+        self.assertEqual(start_frame["data"]["appid"], 123)
+        self.assertEqual(start_frame["data"]["appkey"], "app-key")
+        self.assertEqual(start_frame["data"]["dev_pid"], 17372)
+        self.assertEqual(start_frame["data"]["cuid"], "test-cuid")
+        self.assertEqual(start_frame["data"]["format"], "pcm")
+        self.assertEqual(start_frame["data"]["sample"], 16000)
+        self.assertEqual(finish_frame["type"], "FINISH")
+        self.assertGreater(len(fake_ws.binary_frames), 0)
+        self.assertTrue(fake_ws.closed)
         self.assertEqual(result.text, "hello world")
-        self.assertEqual(result.language, "en")
+        self.assertEqual(result.segments[0].start_seconds, 0.0)
+        self.assertEqual(result.segments[0].end_seconds, 1.0)
 
-    def test_client_can_fetch_access_token_with_secret_key(self) -> None:
+    def test_client_raises_clear_error_for_start_failure(self) -> None:
         audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
-        token_response = FakeHttpResponse(b'{"access_token":"access-token"}')
-        asr_response = FakeHttpResponse(b'{"err_no":0,"result":["hello world"]}')
-        client = BaiduCloudAsrClient(api_key="api-key", secret_key="secret")
+        fake_ws = FakeWebSocket(messages=['{"type":"START","err_no":3301,"err_msg":"bad key"}'])
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
 
-        with patch(
-            "app.asr.baidu.urllib.request.urlopen",
-            side_effect=[token_response, asr_response],
-        ) as urlopen:
-            result = client.transcribe(audio, language="en")
-
-        token_request = urlopen.call_args_list[0].args[0]
-        asr_request = urlopen.call_args_list[1].args[0]
-        body = json.loads(asr_request.data.decode())
-        self.assertIn("grant_type=client_credentials", token_request.full_url)
-        self.assertEqual(body["token"], "access-token")
-        self.assertIsNone(asr_request.get_header("Authorization"))
-        self.assertEqual(result.text, "hello world")
-
-    def test_client_raises_clear_error_for_baidu_failure(self) -> None:
-        audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
-        response = FakeHttpResponse(b'{"err_no":3301,"err_msg":"audio quality error"}')
-        client = BaiduCloudAsrClient(api_key="api-key")
-
-        with patch("app.asr.baidu.urllib.request.urlopen", return_value=response):
-            with self.assertRaisesRegex(RuntimeError, "err_no=3301"):
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            with self.assertRaisesRegex(RuntimeError, "START 失败"):
                 client.transcribe(audio, language="en")
 
-    def test_client_requires_credential(self) -> None:
+    def test_client_requires_app_id_and_app_key(self) -> None:
         with self.assertRaises(AsrConfigurationError):
-            BaiduCloudAsrClient()
+            BaiduRealtimeAsrClient(app_key="app-key")
+        with self.assertRaises(AsrConfigurationError):
+            BaiduRealtimeAsrClient(app_id="123")
 
-    def test_resolve_dev_pid_uses_english_model_for_english(self) -> None:
-        self.assertEqual(resolve_baidu_dev_pid(language="en", configured="auto"), 1737)
-        self.assertEqual(resolve_baidu_dev_pid(language="zh-CN", configured="auto"), 1537)
+    def test_resolve_dev_pid_uses_realtime_models(self) -> None:
+        self.assertEqual(resolve_baidu_dev_pid(language="en", configured="auto"), 17372)
+        self.assertEqual(resolve_baidu_dev_pid(language="zh-CN", configured="auto"), 15372)
         self.assertEqual(resolve_baidu_dev_pid(language="en", configured="80001"), 80001)
 
 
@@ -109,12 +110,16 @@ class AsrFactoryTest(unittest.TestCase):
 
         self.assertIsInstance(client, MockAsrClient)
 
-    def test_factory_returns_baidu_cloud_client(self) -> None:
-        config = AppConfig(asr_provider="baidu-cloud", asr_api_key="api-key")
+    def test_factory_returns_baidu_realtime_client(self) -> None:
+        config = AppConfig(
+            asr_provider="baidu-realtime",
+            asr_app_id="123",
+            asr_api_key="app-key",
+        )
 
         client = create_asr_client(config)
 
-        self.assertIsInstance(client, BaiduCloudAsrClient)
+        self.assertIsInstance(client, BaiduRealtimeAsrClient)
 
 
 if __name__ == "__main__":

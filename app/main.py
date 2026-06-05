@@ -82,9 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖 ASR 提供方，例如 mock 或 baidu-cloud。",
     )
     parser.add_argument(
-        "--asr-baidu-endpoint",
+        "--asr-baidu-ws-url",
         default=None,
-        help="覆盖百度云 ASR 识别接口地址。",
+        help="覆盖百度实时 ASR WebSocket 地址。",
     )
     parser.add_argument(
         "--asr-baidu-dev-pid",
@@ -186,8 +186,8 @@ def apply_cli_config_overrides(config: AppConfig, args: argparse.Namespace) -> A
     updates: dict[str, object] = {}
     if args.asr_provider:
         updates["asr_provider"] = args.asr_provider
-    if args.asr_baidu_endpoint:
-        updates["asr_baidu_endpoint"] = args.asr_baidu_endpoint
+    if args.asr_baidu_ws_url:
+        updates["asr_baidu_ws_url"] = args.asr_baidu_ws_url
     if args.asr_baidu_dev_pid:
         updates["asr_baidu_dev_pid"] = args.asr_baidu_dev_pid
     if args.asr_baidu_cuid:

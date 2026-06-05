@@ -1,4 +1,4 @@
-from app.asr.baidu import BaiduCloudAsrClient
+from app.asr.baidu import BaiduRealtimeAsrClient
 from app.asr.factory import create_asr_client
 from app.asr.mock import MockAsrClient
 from app.asr.types import (
@@ -15,7 +15,7 @@ __all__ = [
     "AsrError",
     "AsrResult",
     "AsrTextSegment",
-    "BaiduCloudAsrClient",
+    "BaiduRealtimeAsrClient",
     "MockAsrClient",
     "create_asr_client",
 ]

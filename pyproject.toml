@@ -8,6 +8,7 @@ dependencies = [
     "onnxruntime>=1.26.0",
     "pyside6>=6.11.1",
     "soundcard>=0.4.6",
+    "websocket-client>=1.9.0",
 ]
 
 [tool.ruff]

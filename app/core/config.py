@@ -7,11 +7,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class AppConfig:
     asr_provider: str = "mock"
+    asr_app_id: str = ""
     asr_api_key: str = ""
-    asr_secret_key: str = ""
-    asr_access_token: str = ""
-    asr_baidu_endpoint: str = "http://vop.baidu.com/server_api"
-    asr_baidu_token_endpoint: str = "https://aip.baidubce.com/oauth/2.0/token"
+    asr_baidu_ws_url: str = "wss://vop.baidu.com/realtime_asr"
     asr_baidu_cuid: str = "ai_interpreter_windows"
     asr_baidu_dev_pid: str = "auto"
     asr_timeout_seconds: float = 30.0
@@ -26,14 +24,9 @@ class AppConfig:
     def from_env(cls) -> AppConfig:
         return cls(
             asr_provider=os.getenv("ASR_PROVIDER", cls.asr_provider),
+            asr_app_id=os.getenv("ASR_APP_ID", cls.asr_app_id),
             asr_api_key=os.getenv("ASR_API_KEY", cls.asr_api_key),
-            asr_secret_key=os.getenv("ASR_SECRET_KEY", cls.asr_secret_key),
-            asr_access_token=os.getenv("ASR_ACCESS_TOKEN", cls.asr_access_token),
-            asr_baidu_endpoint=os.getenv("ASR_BAIDU_ENDPOINT", cls.asr_baidu_endpoint),
-            asr_baidu_token_endpoint=os.getenv(
-                "ASR_BAIDU_TOKEN_ENDPOINT",
-                cls.asr_baidu_token_endpoint,
-            ),
+            asr_baidu_ws_url=os.getenv("ASR_BAIDU_WS_URL", cls.asr_baidu_ws_url),
             asr_baidu_cuid=os.getenv("ASR_BAIDU_CUID", cls.asr_baidu_cuid),
             asr_baidu_dev_pid=os.getenv("ASR_BAIDU_DEV_PID", cls.asr_baidu_dev_pid),
             asr_timeout_seconds=_env_float(
@@ -57,11 +50,9 @@ class AppConfig:
     def with_log_level(self, log_level: str) -> AppConfig:
         return AppConfig(
             asr_provider=self.asr_provider,
+            asr_app_id=self.asr_app_id,
             asr_api_key=self.asr_api_key,
-            asr_secret_key=self.asr_secret_key,
-            asr_access_token=self.asr_access_token,
-            asr_baidu_endpoint=self.asr_baidu_endpoint,
-            asr_baidu_token_endpoint=self.asr_baidu_token_endpoint,
+            asr_baidu_ws_url=self.asr_baidu_ws_url,
             asr_baidu_cuid=self.asr_baidu_cuid,
             asr_baidu_dev_pid=self.asr_baidu_dev_pid,
             asr_timeout_seconds=self.asr_timeout_seconds,
@@ -76,11 +67,9 @@ class AppConfig:
     def to_safe_dict(self) -> dict[str, object]:
         return {
             "asr_provider": self.asr_provider,
+            "asr_app_id": self.asr_app_id,
             "asr_api_key": self._mask_secret(self.asr_api_key),
-            "asr_secret_key": self._mask_secret(self.asr_secret_key),
-            "asr_access_token": self._mask_secret(self.asr_access_token),
-            "asr_baidu_endpoint": self.asr_baidu_endpoint,
-            "asr_baidu_token_endpoint": self.asr_baidu_token_endpoint,
+            "asr_baidu_ws_url": self.asr_baidu_ws_url,
             "asr_baidu_cuid": self.asr_baidu_cuid,
             "asr_baidu_dev_pid": self.asr_baidu_dev_pid,
             "asr_timeout_seconds": self.asr_timeout_seconds,
