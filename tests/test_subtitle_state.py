@@ -115,7 +115,10 @@ class SubtitleStateTest(unittest.TestCase):
         state.apply(SubtitleEvent.final("seg_003", "three", "三"))
 
         self.assertIsNone(state.get("seg_001"))
-        self.assertEqual([segment.segment_id for segment in state.segments()], ["seg_002", "seg_003"])
+        self.assertEqual(
+            [segment.segment_id for segment in state.segments()],
+            ["seg_002", "seg_003"],
+        )
 
     def test_recent_returns_latest_segments(self) -> None:
         state = SubtitleState()
@@ -124,7 +127,10 @@ class SubtitleStateTest(unittest.TestCase):
         state.apply(SubtitleEvent.final("seg_002", "two", "二"))
         state.apply(SubtitleEvent.final("seg_003", "three", "三"))
 
-        self.assertEqual([segment.segment_id for segment in state.recent(2)], ["seg_002", "seg_003"])
+        self.assertEqual(
+            [segment.segment_id for segment in state.recent(2)],
+            ["seg_002", "seg_003"],
+        )
 
 
 if __name__ == "__main__":

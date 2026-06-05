@@ -3,6 +3,7 @@ import unittest
 from PySide6.QtWidgets import QApplication
 
 from app.core.config import AppConfig
+from app.core.recognition_profile import get_recognition_profile
 from app.core.subtitle import SubtitleSegmentStatus
 from app.ui.main_window import MainWindow
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
@@ -66,6 +67,24 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
 
         window._hide_overlay()
         self.assertFalse(window.overlay.isVisible())
+
+    def test_main_window_maps_recognition_mode_buttons(self) -> None:
+        window = MainWindow(AppConfig())
+
+        window.recognition_mode_buttons[2].setChecked(True)
+        profile = window._selected_recognition_profile()
+
+        self.assertEqual(profile.mode, "high-accuracy")
+        self.assertEqual(profile.queue_size, 64)
+
+    def test_main_window_shows_dropped_chunks_warning(self) -> None:
+        window = MainWindow(AppConfig())
+        window._active_recognition_profile = get_recognition_profile("balanced")
+
+        window._handle_dropped_chunks_changed(8)
+
+        self.assertEqual(window.dropped_chunks_label.text(), "丢帧：8")
+        self.assertIn("识别处理可能跟不上", window.correction_hint_label.text())
 
     def test_main_window_advances_demo_stream_once(self) -> None:
         window = MainWindow(AppConfig())

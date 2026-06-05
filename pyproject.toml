@@ -7,7 +7,9 @@ requires-python = ">=3.11"
 dependencies = [
     "onnxruntime>=1.26.0",
     "pyside6>=6.11.1",
+    "python-dotenv>=1.2.2",
     "soundcard>=0.4.6",
+    "websocket-client>=1.9.0",
 ]
 
 [tool.ruff]
@@ -16,3 +18,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.16",
+]
