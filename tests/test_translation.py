@@ -26,6 +26,25 @@ class FakeHttpResponse:
         return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
 
 
+class FakeStreamHttpResponse:
+    def __init__(self, lines: list[str]) -> None:
+        self.lines = [line.encode("utf-8") for line in lines]
+        self.index = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def readline(self) -> bytes:
+        if self.index >= len(self.lines):
+            return b""
+        line = self.lines[self.index]
+        self.index += 1
+        return line
+
+
 class OpenAICompatibleTranslatorTest(unittest.TestCase):
     def test_translate_posts_chat_completion_request(self) -> None:
         translator = OpenAICompatibleTranslator(
@@ -58,8 +77,49 @@ class OpenAICompatibleTranslatorTest(unittest.TestCase):
         self.assertEqual(captured["auth"], "Bearer translation-key")
         self.assertEqual(captured["timeout"], 30.0)
         self.assertEqual(captured["body"]["model"], "model-a")
+        self.assertFalse(captured["body"]["stream"])
         self.assertIn("上下文", captured["body"]["messages"][1]["content"])
         self.assertEqual(result.text, "我们正在测试实时字幕。")
+
+    def test_stream_translate_yields_chat_completion_deltas(self) -> None:
+        translator = OpenAICompatibleTranslator(
+            api_key="translation-key",
+            base_url="https://example.test/v1",
+            model="model-a",
+        )
+        captured = {}
+
+        def fake_urlopen(request, timeout: float):
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            captured["accept"] = request.headers["Accept"]
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeStreamHttpResponse(
+                [
+                    ": keep-alive\n",
+                    "\n",
+                    'data: {"choices":[{"delta":{"content":"我们"}}]}\n',
+                    'data: {"choices":[{"delta":{"content":"正在测试"}}]}\n',
+                    "data: [DONE]\n",
+                ]
+            )
+
+        with patch("app.translate.openai_compatible.urllib.request.urlopen", fake_urlopen):
+            chunks = list(
+                translator.stream_translate(
+                    TranslationRequest(
+                        source_text="We are testing.",
+                        source_language="en",
+                        target_language="zh-CN",
+                    )
+                )
+            )
+
+        self.assertEqual(captured["url"], "https://example.test/v1/chat/completions")
+        self.assertEqual(captured["timeout"], 30.0)
+        self.assertEqual(captured["accept"], "text/event-stream")
+        self.assertTrue(captured["body"]["stream"])
+        self.assertEqual(chunks, ["我们", "正在测试"])
 
     def test_translate_requires_real_model_config(self) -> None:
         with self.assertRaises(TranslationConfigurationError):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -38,3 +39,6 @@ class TranslatorClient(Protocol):
 
     def translate(self, request: TranslationRequest) -> TranslationResult:
         """Translate one source-language text into the configured target language."""
+
+    def stream_translate(self, request: TranslationRequest) -> Iterator[str]:
+        """Yield translated text deltas as soon as the provider streams them."""

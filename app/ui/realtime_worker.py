@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event, Lock
 from typing import Any
@@ -71,6 +72,7 @@ class RealtimeSubtitleWorker(QObject):
         self._finalized_segments: set[str] = set()
         self._last_partial_translation_at: dict[str, float] = {}
         self._last_partial_translation_source: dict[str, str] = {}
+        self._partial_translation_versions: dict[str, int] = {}
 
     @Slot()
     def run(self) -> None:
@@ -86,7 +88,7 @@ class RealtimeSubtitleWorker(QObject):
             client = create_asr_client(self.config)
             self._translator = create_translator_client(self.config)
             self._translation_executor = ThreadPoolExecutor(
-                max_workers=2,
+                max_workers=4,
                 thread_name_prefix="translation",
             )
             capture = SystemAudioCapture(sample_rate=16000, channels=1)
@@ -235,6 +237,7 @@ class RealtimeSubtitleWorker(QObject):
             self._finalized_segments = set()
             self._last_partial_translation_at = {}
             self._last_partial_translation_source = {}
+            self._partial_translation_versions = {}
 
     def _shutdown_translation_executor(self) -> None:
         with self._translation_lock:
@@ -282,11 +285,16 @@ class RealtimeSubtitleWorker(QObject):
                 return
             self._last_partial_translation_at[segment_id] = now
             self._last_partial_translation_source[segment_id] = source_text
+            version = self._partial_translation_versions.get(segment_id, 0) + 1
+            self._partial_translation_versions[segment_id] = version
             context = tuple(self._context_sources)
 
-        future = executor.submit(self._translate_source, source_text, context)
-        future.add_done_callback(
-            lambda task: self._handle_partial_translation_result(segment_id, source_text, task)
+        executor.submit(
+            self._stream_partial_translation,
+            segment_id,
+            source_text,
+            context,
+            version,
         )
 
     def _schedule_final_translation(
@@ -300,14 +308,12 @@ class RealtimeSubtitleWorker(QObject):
         if executor is None or self._translator is None:
             return
 
-        future = executor.submit(self._translate_source, source_text, context)
-        future.add_done_callback(
-            lambda task: self._handle_final_translation_result(
-                segment_id,
-                source_text,
-                current_zh_text,
-                task,
-            )
+        executor.submit(
+            self._stream_final_translation,
+            segment_id,
+            source_text,
+            current_zh_text,
+            context,
         )
 
     def _translate_source(self, source_text: str, context: tuple[str, ...]) -> str:
@@ -323,6 +329,93 @@ class RealtimeSubtitleWorker(QObject):
             )
         )
         return result.text
+
+    def _stream_translate_source(self, source_text: str, context: tuple[str, ...]) -> Iterator[str]:
+        translator = self._translator
+        if translator is None:
+            raise TranslationError("翻译器尚未初始化。")
+        yield from translator.stream_translate(
+            TranslationRequest(
+                source_text=source_text,
+                source_language=self.config.source_language,
+                target_language=self.config.target_language,
+                context=context,
+            )
+        )
+
+    def _stream_partial_translation(
+        self,
+        segment_id: str,
+        source_text: str,
+        context: tuple[str, ...],
+        version: int,
+    ) -> None:
+        chunks: list[str] = []
+        try:
+            for delta in self._stream_translate_source(source_text, context):
+                chunks.append(delta)
+                zh_text = _normalize_asr_text("".join(chunks))
+                if not zh_text:
+                    continue
+                latest_source = self._accept_partial_translation_chunk(
+                    segment_id=segment_id,
+                    source_text=source_text,
+                    zh_text=zh_text,
+                    version=version,
+                )
+                if latest_source is None:
+                    return
+                self.subtitle_event.emit(SubtitleEvent.partial(segment_id, latest_source, zh_text))
+        except TranslationError as exc:
+            self.translation_error_occurred.emit(f"翻译失败：{exc}")
+        except Exception as exc:  # noqa: BLE001
+            self.translation_error_occurred.emit(f"翻译线程异常：{exc}")
+
+    def _stream_final_translation(
+        self,
+        segment_id: str,
+        source_text: str,
+        old_zh_text: str,
+        context: tuple[str, ...],
+    ) -> None:
+        chunks: list[str] = []
+        try:
+            for delta in self._stream_translate_source(source_text, context):
+                chunks.append(delta)
+        except TranslationError as exc:
+            self.translation_error_occurred.emit(f"翻译失败：{exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.translation_error_occurred.emit(f"翻译线程异常：{exc}")
+            return
+
+        self._emit_final_translation_update(
+            segment_id=segment_id,
+            source_text=source_text,
+            old_zh_text=old_zh_text,
+            zh_text=_normalize_asr_text("".join(chunks)),
+        )
+
+    def _accept_partial_translation_chunk(
+        self,
+        *,
+        segment_id: str,
+        source_text: str,
+        zh_text: str,
+        version: int,
+    ) -> str | None:
+        with self._translation_lock:
+            if self._translation_closed:
+                return None
+            if segment_id in self._finalized_segments:
+                return None
+            if self._partial_translation_versions.get(segment_id) != version:
+                return None
+            latest_source = self._latest_source_by_segment.get(segment_id, "")
+            if not _is_prefix_translation_candidate(source_text, latest_source):
+                return None
+            self._partial_zh_by_segment[segment_id] = zh_text
+            return latest_source
 
     def _handle_partial_translation_result(
         self,
@@ -368,6 +461,21 @@ class RealtimeSubtitleWorker(QObject):
             self.translation_error_occurred.emit(f"翻译线程异常：{exc}")
             return
 
+        self._emit_final_translation_update(
+            segment_id=segment_id,
+            source_text=source_text,
+            old_zh_text=old_zh_text,
+            zh_text=zh_text,
+        )
+
+    def _emit_final_translation_update(
+        self,
+        *,
+        segment_id: str,
+        source_text: str,
+        old_zh_text: str,
+        zh_text: str,
+    ) -> None:
         if not zh_text or zh_text == old_zh_text:
             return
         with self._translation_lock:

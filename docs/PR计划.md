@@ -136,11 +136,11 @@
 
 ### 实现思路
 
-通过 OpenAI-compatible 翻译适配器接入真实大模型接口，输入当前文本和 worker 本地维护的最近已确认原文上下文。ASR partial 先更新原文字幕，防抖后的 partial 翻译返回后更新中文；ASR final 先确认字幕段，最终译文返回后用 `segment.update(reason="translation_final")` 回写中文字幕。翻译失败只提示错误，不中断 ASR。
+通过 OpenAI-compatible 翻译适配器接入真实大模型接口，输入当前文本和 worker 本地维护的最近已确认原文上下文。ASR partial 先更新原文字幕，防抖后的 partial 翻译使用 `stream=true` 读取 SSE 中文增量并持续刷新悬浮字幕；ASR final 先确认字幕段，最终译文返回后用 `segment.update(reason="translation_final")` 回写精修中文字幕。翻译失败只提示错误，不中断 ASR。
 
 ### 测试方式
 
-使用 `--translate-text` 调用真实翻译模型验证接口配置；使用单元测试验证请求构造、响应解析、配置错误和 final 翻译回写事件。
+使用 `--translate-text` 调用真实翻译模型验证接口配置；使用单元测试验证请求构造、SSE 流式响应解析、配置错误、partial 增量刷新和 final 翻译回写事件。
 
 ## PR 11：实现历史字幕自动修正
 
