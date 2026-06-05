@@ -1,5 +1,6 @@
 import io
 import tempfile
+import time
 import unittest
 import wave
 from contextlib import redirect_stdout
@@ -9,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from app.audio.capture import AudioChunk, AudioOutputDevice, SystemAudioCapture
+from app.audio.capture import AudioChunk, AudioOutputDevice, QueuedAudioCapture, SystemAudioCapture
 from app.main import list_audio_devices, record_system_audio
 
 
@@ -118,6 +119,63 @@ class SystemAudioCaptureStreamTest(unittest.TestCase):
 
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0].frames, 8000)
+
+
+class QueuedAudioCaptureTest(unittest.TestCase):
+    def test_queued_capture_reads_chunks_from_background_thread(self) -> None:
+        chunk = _test_chunk(0.25)
+        capture = QueuedAudioCapture(
+            _FakeStreamingCapture([chunk]),
+            chunk_duration_seconds=0.16,
+            max_chunks=4,
+        )
+
+        capture.start()
+        received = capture.get_chunk(timeout_seconds=1.0)
+        capture.stop()
+
+        self.assertIsNotNone(received)
+        self.assertEqual(received.frames, chunk.frames)
+
+    def test_queued_capture_drops_old_chunks_when_queue_is_full(self) -> None:
+        chunks = [_test_chunk(0.1), _test_chunk(0.2), _test_chunk(0.3)]
+        capture = QueuedAudioCapture(
+            _FakeStreamingCapture(chunks),
+            chunk_duration_seconds=0.16,
+            max_chunks=1,
+        )
+
+        capture.start()
+        _wait_until_stopped(capture)
+        received = capture.get_chunk(timeout_seconds=1.0)
+        capture.stop()
+
+        self.assertIsNotNone(received)
+        self.assertAlmostEqual(float(received.samples[0, 0]), 0.3)
+        self.assertEqual(capture.dropped_chunks, 2)
+
+
+class _FakeStreamingCapture:
+    def __init__(self, chunks: list[AudioChunk]) -> None:
+        self.chunks = chunks
+
+    def stream_chunks(self, **kwargs):  # noqa: ANN003
+        stop_event = kwargs.get("stop_event")
+        for chunk in self.chunks:
+            if stop_event is not None and stop_event.is_set():
+                break
+            yield chunk
+
+
+def _test_chunk(value: float) -> AudioChunk:
+    samples = np.full((4, 1), value, dtype=np.float32)
+    return AudioChunk(samples=samples, sample_rate=16000)
+
+
+def _wait_until_stopped(capture: QueuedAudioCapture) -> None:
+    deadline = time.monotonic() + 1.0
+    while capture.is_running and time.monotonic() < deadline:
+        time.sleep(0.01)
 
 
 if __name__ == "__main__":

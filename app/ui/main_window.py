@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from app.core.config import AppConfig
 from app.core.demo_stream import DemoSubtitleScript, build_default_demo_script
 from app.core.subtitle import SubtitleEvent, SubtitleSegment, SubtitleSegmentStatus, SubtitleState
+from app.ui.realtime_worker import RealtimeSubtitleWorker
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
 from app.ui.theme import apply_app_theme
 
@@ -39,6 +40,8 @@ class MainWindow(QMainWindow):
         self.demo_timer = QTimer(self)
         self.demo_timer.setSingleShot(True)
         self.demo_timer.timeout.connect(self._advance_demo_stream)
+        self.realtime_thread: QThread | None = None
+        self.realtime_worker: RealtimeSubtitleWorker | None = None
 
         self.overlay = SubtitleOverlayWindow()
         self.status_label: QLabel | None = None
@@ -152,9 +155,9 @@ class MainWindow(QMainWindow):
             button.setMinimumHeight(42)
             controls.addWidget(button)
 
-        start.clicked.connect(self._start_demo_stream)
-        pause.clicked.connect(self._pause_demo_stream)
-        stop.clicked.connect(self._stop_demo_stream)
+        start.clicked.connect(self._start_subtitle_stream)
+        pause.clicked.connect(self._pause_subtitle_stream)
+        stop.clicked.connect(self._stop_subtitle_stream)
 
         self.overlay_toggle = QPushButton("悬浮字幕")
         self.overlay_toggle.setObjectName("GhostButton")
@@ -180,17 +183,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(10)
 
-        source = QLabel("等待模拟字幕流启动。")
+        source = QLabel("等待字幕流启动。")
         source.setObjectName("SourceCaption")
         source.setWordWrap(True)
         self.source_caption_label = source
 
-        translation = QLabel("点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。")
+        translation = QLabel("点击“开始”后，系统将开始监听系统音频或运行内置演示。")
         translation.setObjectName("TranslatedCaption")
         translation.setWordWrap(True)
         self.translation_caption_label = translation
 
-        correction = QLabel("演示模式：使用内置技术分享字幕脚本，不调用外部 AI 服务。")
+        correction = QLabel("实时模式：MID_TEXT 会显示为临时字幕，FIN_TEXT 会确认当前字幕。")
         correction.setObjectName("CorrectionHint")
         correction.setWordWrap(True)
         self.correction_hint_label = correction
@@ -204,7 +207,7 @@ class MainWindow(QMainWindow):
     def _build_history_list(self) -> QListWidget:
         history = QListWidget()
         history.setObjectName("HistoryList")
-        history.addItem("点击“开始”查看模拟字幕历史。")
+        history.addItem("点击“开始”查看字幕历史。")
         self.history_list = history
 
         return history
@@ -376,6 +379,89 @@ class MainWindow(QMainWindow):
         }.get(index, "bilingual")
         self.overlay.set_display_mode(mode)
 
+    def _start_subtitle_stream(self) -> None:
+        if self._is_realtime_running():
+            return
+
+        if self.config.asr_provider.strip().lower() == "mock":
+            self._start_demo_stream()
+            return
+
+        self.demo_timer.stop()
+        self._reset_realtime_state()
+        self._show_overlay()
+        self._set_transport_running(True)
+        self._set_status("启动中")
+
+        thread = QThread(self)
+        worker = RealtimeSubtitleWorker(self.config)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.subtitle_event.connect(self._handle_realtime_subtitle_event)
+        worker.status_changed.connect(self._set_status)
+        worker.error_occurred.connect(self._handle_realtime_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._handle_realtime_finished)
+
+        self.realtime_thread = thread
+        self.realtime_worker = worker
+        thread.start()
+
+    def _pause_subtitle_stream(self) -> None:
+        if self._is_realtime_running():
+            self._stop_realtime_worker()
+            self._set_status("暂停")
+            if self.correction_hint_label is not None:
+                self.correction_hint_label.setText("已暂停实时识别，点击“开始”可重新监听系统音频。")
+            return
+        self._pause_demo_stream()
+
+    def _stop_subtitle_stream(self) -> None:
+        if self._is_realtime_running():
+            self._stop_realtime_worker()
+            self._hide_overlay()
+            self._reset_realtime_state()
+            self._set_status("待机")
+            return
+        self._stop_demo_stream()
+
+    def _is_realtime_running(self) -> bool:
+        return self.realtime_thread is not None and self.realtime_thread.isRunning()
+
+    def _stop_realtime_worker(self) -> None:
+        if self.realtime_worker is not None:
+            self.realtime_worker.stop()
+
+    def _handle_realtime_subtitle_event(self, event: SubtitleEvent) -> None:
+        segment = self.subtitle_state.apply(event)
+        self._render_subtitle_event(event, segment)
+
+    def _handle_realtime_error(self, message: str) -> None:
+        self._set_status("异常")
+        if self.correction_hint_label is not None:
+            self.correction_hint_label.setText(message)
+
+    def _handle_realtime_finished(self) -> None:
+        self.realtime_thread = None
+        self.realtime_worker = None
+        self._set_transport_running(False)
+        if (
+            self.status_label is not None
+            and self.status_label.text() not in {"异常", "暂停", "待机"}
+        ):
+            self._set_status("待机")
+
+    def _set_transport_running(self, running: bool) -> None:
+        if self.start_button is not None:
+            self.start_button.setEnabled(not running)
+        if self.pause_button is not None:
+            self.pause_button.setEnabled(True)
+        if self.stop_button is not None:
+            self.stop_button.setEnabled(True)
+
     def _start_demo_stream(self) -> None:
         if self.demo_step_index >= len(self.demo_script):
             self._reset_demo_state()
@@ -448,7 +534,11 @@ class MainWindow(QMainWindow):
             reason = event.reason or "context_correction"
             return f"已修正：{reason}"
         if segment.status == SubtitleSegmentStatus.FINAL:
+            if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
+                return "FIN_TEXT：当前语音段已确认，翻译模块接入后会替换为中文字幕。"
             return "正式字幕：当前语音段已稳定。"
+        if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
+            return "MID_TEXT：实时识别中的临时字幕，后续 FIN_TEXT 会回写确认。"
         return "临时字幕：优先保证低延迟，后续上下文可能回写修正。"
 
     def _format_history_item(self, segment: SubtitleSegment) -> str:
@@ -458,7 +548,26 @@ class MainWindow(QMainWindow):
             SubtitleSegmentStatus.UPDATED: "修正",
         }[segment.status]
         revision_marker = " · 已回写" if segment.revisions else ""
+        if segment.source_text == segment.zh_text:
+            return f"{state_label}{revision_marker}  {segment.source_text}"
         return f"{state_label}{revision_marker}  {segment.zh_text}\n{segment.source_text}"
+
+    def _reset_realtime_state(self) -> None:
+        self.subtitle_state = SubtitleState()
+        if self.source_caption_label is not None:
+            self.source_caption_label.setText("等待系统音频中的语音。")
+        if self.translation_caption_label is not None:
+            self.translation_caption_label.setText("实时 ASR 已准备，识别结果会先以原文字幕展示。")
+        if self.correction_hint_label is not None:
+            self.correction_hint_label.setText("MID_TEXT 作为临时字幕，FIN_TEXT 作为正式字幕。")
+        if self.history_list is not None:
+            self.history_list.clear()
+            self.history_list.addItem("实时字幕历史将在这里更新。")
+        self.overlay.set_caption(
+            source_text="等待系统音频中的语音。",
+            zh_text="实时 ASR 已准备。",
+            state=SubtitleSegmentStatus.PARTIAL.value,
+        )
 
     def _reset_demo_state(self) -> None:
         self.subtitle_state = SubtitleState()
@@ -483,6 +592,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
         self.demo_timer.stop()
+        if self.realtime_worker is not None:
+            self.realtime_worker.stop()
+        if self.realtime_thread is not None and self.realtime_thread.isRunning():
+            self.realtime_thread.quit()
+            self.realtime_thread.wait(2000)
         self.overlay.close()
         super().closeEvent(event)
 

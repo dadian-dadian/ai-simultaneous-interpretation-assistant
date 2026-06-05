@@ -29,7 +29,7 @@ MVP 阶段优先使用 Python 快速验证核心链路：
 
 - 桌面界面：PySide6 / Qt Quick
 - 系统声音采集：Windows WASAPI Loopback
-- 音频处理：持续音频流、环形缓冲、Silero VAD 分段和滑动窗口缓存
+- 音频处理：独立采集线程、有界音频队列、环形缓冲、Silero VAD 分段和滑动窗口缓存
 - 语音识别：mock ASR 与百度智能云实时语音识别 WebSocket 适配器
 - 中文翻译：大模型翻译接口
 - 字幕修正：基于上下文的字幕段回写机制
@@ -96,7 +96,7 @@ tests/
 
 ## 当前状态
 
-项目处于核心链路逐步接入阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理、模拟字幕流演示、Windows 系统音频捕获、Silero VAD 分段和 ASR 适配器命令行验证入口。桌面主流程目前仍使用模拟字幕流，真实 ASR 已可通过命令行验证，翻译和字幕修正 AI 能力将在后续 PR 接入。
+项目处于核心链路逐步接入阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理、模拟字幕流演示、Windows 系统音频捕获、Silero VAD 分段和百度实时 ASR WebSocket 适配器。桌面主流程在 `ASR_PROVIDER=baidu-realtime` 时会启动真实系统音频监听，将百度返回的 `MID_TEXT` 作为临时字幕、`FIN_TEXT` 作为正式字幕接入主窗口与悬浮窗；在 `ASR_PROVIDER=mock` 时仍保留内置演示。当前 PR 先展示 ASR 原文结果，中文翻译和字幕修正 AI 能力将在后续 PR 接入。
 
 ## 依赖说明
 
@@ -155,7 +155,7 @@ ASR_BAIDU_DEV_PID=auto
 uv run python -m app
 ```
 
-当前主窗口提供开始、暂停、停止、状态展示、音频源选择、翻译模式和字幕样式等基础界面。点击“开始”会启动内置模拟字幕流，演示临时字幕、正式字幕和历史字幕回写修正；点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。系统音频捕获、VAD 和 ASR 已提供命令行验证入口，后续 PR 会继续接入桌面主流程和翻译链路。
+当前主窗口提供开始、暂停、停止、状态展示、音频源选择、翻译模式和字幕样式等基础界面。配置百度实时 ASR 后，点击“开始”会启动系统音频监听、Silero VAD 分段和百度 WebSocket 流式识别，`MID_TEXT` 会在当前字幕段原地刷新，`FIN_TEXT` 会确认当前字幕段；点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。未配置真实 ASR 时，可将 `ASR_PROVIDER` 设为 `mock` 使用内置演示模式。
 
 ### 演示模式
 
@@ -233,7 +233,7 @@ uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav
 uv run python -m app --preview-asr-stream --stream-duration 10 --chunk-duration 0.16 --asr-provider mock
 ```
 
-命令会捕获系统音频，通过 Silero VAD 判断语音开始和结束。对支持流式的百度实时 ASR WebSocket，程序会在 `speech_start` 后立即建立会话，并随着系统音频持续发送 160ms PCM 音频帧；在 `speech_end` 后发送 `FINISH` 并输出最终识别结果。mock 模式适合验证基础链路；配置百度实时 ASR WebSocket 后，可用同一命令测试实际识别效果。
+命令会通过独立采集线程捕获系统音频，并使用有界队列把最新音频块交给 VAD/ASR 消费，避免识别处理阻塞录音线程。Silero VAD 判断语音开始和结束后，百度实时 ASR WebSocket 会在 `speech_start` 后立即建立会话，并随着系统音频持续发送 160ms PCM 音频帧；收到 `MID_TEXT` 时输出临时结果，在 `speech_end` 后发送 `FINISH` 并输出 `FIN_TEXT` 最终识别结果。mock 模式适合验证基础链路；配置百度实时 ASR WebSocket 后，可用同一命令测试实际识别效果。
 
 ### 启动无 UI 骨架
 
