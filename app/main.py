@@ -4,10 +4,13 @@ import argparse
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 from app import __version__
+from app.audio.buffer import AudioRingBuffer
 from app.audio.capture import SystemAudioCapture
+from app.audio.vad import SileroOnnxVad, SileroVadSegmenter, VadEventType
 from app.core.config import AppConfig
 from app.core.logging import configure_logging
 
@@ -24,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--record-duration", type=float, default=3.0, help="系统音频录制时长，单位秒。")
     parser.add_argument("--audio-sample-rate", type=int, default=16000, help="录制采样率。")
     parser.add_argument("--audio-channels", type=int, default=1, help="录制声道数。")
+    parser.add_argument("--preview-vad-stream", action="store_true", help="预览系统音频流的 Silero VAD 分段。")
+    parser.add_argument("--stream-duration", type=float, default=5.0, help="VAD 预览时长，单位秒。")
+    parser.add_argument("--chunk-duration", type=float, default=0.5, help="音频流 chunk 时长，单位秒。")
+    parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD 语音概率阈值。")
+    parser.add_argument("--vad-min-silence-ms", type=int, default=600, help="确认语音结束所需连续静音时长。")
     parser.add_argument(
         "--log-level",
         default=None,
@@ -64,6 +72,14 @@ def main(argv: list[str] | None = None) -> int:
             channels=args.audio_channels,
         )
 
+    if args.preview_vad_stream:
+        return preview_vad_stream(
+            duration_seconds=args.stream_duration,
+            chunk_duration_seconds=args.chunk_duration,
+            threshold=args.vad_threshold,
+            min_silence_ms=args.vad_min_silence_ms,
+        )
+
     if not args.no_ui:
         return launch_desktop_app(config)
 
@@ -71,6 +87,47 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("当前 ASR 提供方：%s", config.asr_provider)
     logger.info("当前翻译提供方：%s", config.translation_provider)
     logger.info("已使用 --no-ui 跳过桌面窗口")
+    return 0
+
+
+def preview_vad_stream(
+    duration_seconds: float,
+    chunk_duration_seconds: float,
+    threshold: float,
+    min_silence_ms: int,
+) -> int:
+    capture = SystemAudioCapture(sample_rate=16000, channels=1)
+    buffer = AudioRingBuffer(max_duration_seconds=8.0, sample_rate=16000)
+    segmenter = SileroVadSegmenter(
+        vad=SileroOnnxVad(threshold=threshold),
+        min_silence_ms=min_silence_ms,
+    )
+
+    started_at = time.monotonic()
+    chunk_count = 0
+    print("开始预览系统音频 Silero VAD 分段。")
+    print(f"时长 {duration_seconds:.1f}s，chunk {chunk_duration_seconds:.2f}s，阈值 {threshold:.2f}")
+
+    for chunk in capture.stream_chunks(chunk_duration_seconds=chunk_duration_seconds):
+        chunk_count += 1
+        buffer.append(chunk)
+        events = segmenter.accept_chunk(chunk)
+        elapsed = time.monotonic() - started_at
+        for event in events:
+            if event.type == VadEventType.SPEECH_START:
+                print(f"{elapsed:6.2f}s speech_start p={event.speech_probability:.3f}")
+            elif event.segment is not None:
+                print(
+                    f"{elapsed:6.2f}s speech_end duration={event.segment.duration_seconds:.2f}s"
+                )
+
+        if elapsed >= duration_seconds:
+            break
+
+    for event in segmenter.flush():
+        if event.segment is not None:
+            print(f"flush speech_end duration={event.segment.duration_seconds:.2f}s")
+    print(f"已处理 {chunk_count} 个音频块，最近缓冲 {buffer.duration_seconds:.2f}s。")
     return 0
 
 
