@@ -36,6 +36,28 @@ class AudioChunkTest(unittest.TestCase):
                 self.assertEqual(wav_file.getframerate(), 16000)
                 self.assertEqual(wav_file.getnframes(), 4)
 
+    def test_chunk_can_roundtrip_wav_file(self) -> None:
+        samples = np.array([[0.0], [0.25], [-0.25], [1.0]], dtype=np.float32)
+        chunk = AudioChunk(samples=samples, sample_rate=16000)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = chunk.save_wav(Path(tmp_dir) / "capture.wav")
+            restored = AudioChunk.from_wav(path)
+
+        self.assertEqual(restored.sample_rate, 16000)
+        self.assertEqual(restored.channels, 1)
+        self.assertEqual(restored.frames, 4)
+        np.testing.assert_allclose(restored.samples, samples, atol=1 / 32768)
+
+    def test_chunk_can_export_wav_bytes(self) -> None:
+        samples = np.array([[0.0], [0.25], [-0.25], [1.0]], dtype=np.float32)
+        chunk = AudioChunk(samples=samples, sample_rate=16000)
+
+        payload = chunk.to_wav_bytes()
+
+        self.assertTrue(payload.startswith(b"RIFF"))
+        self.assertIn(b"WAVE", payload[:16])
+
 
 class AudioCliTest(unittest.TestCase):
     @patch("app.main.SystemAudioCapture")

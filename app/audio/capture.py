@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,26 @@ class AudioOutputDevice:
 class AudioChunk:
     samples: np.ndarray
     sample_rate: int
+
+    @classmethod
+    def from_wav(cls, path: str | Path) -> "AudioChunk":
+        source = Path(path)
+        with wave.open(str(source), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            sample_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
+            payload = wav_file.readframes(frame_count)
+
+        if sample_width != 2:
+            raise ValueError("Only 16-bit PCM wav files are supported")
+
+        samples = np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
+        if channels == 1:
+            samples = samples.reshape(-1, 1)
+        else:
+            samples = samples.reshape(-1, channels)
+        return cls(samples=samples, sample_rate=sample_rate)
 
     @property
     def channels(self) -> int:
@@ -48,15 +69,24 @@ class AudioChunk:
         pcm = (clipped * 32767).astype(np.int16)
         return pcm.tobytes()
 
+    def to_wav_bytes(self) -> bytes:
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav_file:
+            self._write_wav(wav_file)
+        return buffer.getvalue()
+
     def save_wav(self, path: str | Path) -> Path:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         with wave.open(str(target), "wb") as wav_file:
-            wav_file.setnchannels(self.channels)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(self.sample_rate)
-            wav_file.writeframes(self.to_pcm16_bytes())
+            self._write_wav(wav_file)
         return target
+
+    def _write_wav(self, wav_file) -> None:
+        wav_file.setnchannels(self.channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(self.sample_rate)
+        wav_file.writeframes(self.to_pcm16_bytes())
 
 
 class SystemAudioCapture:

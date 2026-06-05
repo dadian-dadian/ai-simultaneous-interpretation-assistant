@@ -30,7 +30,7 @@ MVP 阶段优先使用 Python 快速验证核心链路：
 - 桌面界面：PySide6 / Qt Quick
 - 系统声音采集：Windows WASAPI Loopback
 - 音频处理：持续音频流、环形缓冲、Silero VAD 分段和滑动窗口缓存
-- 语音识别：AI ASR 接口或 faster-whisper 适配器
+- 语音识别：mock ASR 与 OpenAI 兼容 ASR HTTP 适配器
 - 中文翻译：大模型翻译接口
 - 字幕修正：基于上下文的字幕段回写机制
 - 打包发布：PyInstaller
@@ -96,7 +96,7 @@ tests/
 
 ## 当前状态
 
-项目处于桌面应用基础搭建阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理和模拟字幕流演示。后续功能将按照小粒度 PR 持续提交，确保主分支在每次合并后保持可运行或可预览状态。
+项目处于核心链路逐步接入阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理、模拟字幕流演示、Windows 系统音频捕获、Silero VAD 分段和 ASR 适配器命令行验证入口。桌面主流程目前仍使用模拟字幕流，真实 ASR 已可通过命令行验证，翻译和字幕修正 AI 能力将在后续 PR 接入。
 
 ## 依赖说明
 
@@ -108,6 +108,8 @@ tests/
 - ONNX Runtime：用于运行 Silero VAD ONNX 模型，进行语音活动检测。
 
 项目内置 `assets/models/silero_vad.onnx`，来源为 Silero VAD 官方仓库。当前 VAD 路线只使用 ONNX Runtime，不引入 PyTorch / torchaudio。
+
+ASR 真实服务通过 Python 标准库 `urllib` 调用 OpenAI 兼容的 HTTP 转写接口，目前未额外引入 HTTP 第三方库。mock ASR 为本项目自研演示适配器，用于没有 API Key 时验证音频段到原文文本的链路。
 
 依赖版本通过 `pyproject.toml` 和 `uv.lock` 管理，确保后续评审时可以复现相同环境。后续每次新增第三方库或框架时，将同步更新 README，说明依赖用途和原创功能边界。
 
@@ -133,7 +135,7 @@ uv sync
 uv run python -m app
 ```
 
-当前主窗口提供开始、暂停、停止、状态展示、音频源选择、翻译模式和字幕样式等基础界面。点击“开始”会启动内置模拟字幕流，演示临时字幕、正式字幕和历史字幕回写修正；点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。系统音频捕获、ASR 和翻译模块将在后续 PR 中接入。
+当前主窗口提供开始、暂停、停止、状态展示、音频源选择、翻译模式和字幕样式等基础界面。点击“开始”会启动内置模拟字幕流，演示临时字幕、正式字幕和历史字幕回写修正；点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。系统音频捕获、VAD 和 ASR 已提供命令行验证入口，后续 PR 会继续接入桌面主流程和翻译链路。
 
 ### 演示模式
 
@@ -174,6 +176,43 @@ uv run python -m app --preview-vad-stream --stream-duration 5
 ```
 
 命令会持续捕获系统音频流，并通过 ONNX Runtime + Silero VAD 输出 `speech_start` / `speech_end` 分段事件。
+
+### 识别本地音频文件
+
+可以先录制系统音频，再使用 mock ASR 验证识别入口：
+
+```powershell
+uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav --asr-provider mock
+```
+
+mock 模式不会调用外部服务，会输出固定英文识别文本，用于验证“音频文件 -> ASR 结果”的程序链路。
+
+如需调用真实 ASR 服务，可配置 OpenAI 兼容接口：
+
+```powershell
+$env:ASR_PROVIDER="openai-compatible"
+$env:ASR_API_KEY="你的 API Key"
+$env:ASR_MODEL="gpt-4o-mini-transcribe"
+$env:ASR_BASE_URL="https://api.openai.com/v1"
+uv run python -m app --transcribe-audio artifacts/audio/system_capture.wav
+```
+
+可选参数：
+
+- `ASR_RESPONSE_FORMAT`：默认 `json`，也可按兼容服务能力设置为 `text` 或 `verbose_json`。
+- `ASR_TIMEOUT_SECONDS`：默认 `30`。
+- `--asr-language en`：指定识别语言，默认读取 `SOURCE_LANGUAGE`。
+- `--asr-prompt "technical conference"`：向 ASR 提供场景提示词。
+
+### 预览系统音频 ASR 分段
+
+播放一段包含英文人声的视频后执行：
+
+```powershell
+uv run python -m app --preview-asr-stream --stream-duration 10 --chunk-duration 0.25 --asr-provider mock
+```
+
+命令会捕获系统音频，通过 Silero VAD 切分语音段，并在每个 `speech_end` 后调用 ASR。mock 模式适合验证实时链路；配置真实 ASR 后，可用同一命令测试实际识别效果。
 
 ### 启动无 UI 骨架
 

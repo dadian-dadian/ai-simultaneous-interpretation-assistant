@@ -5,11 +5,13 @@ import json
 import logging
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from app import __version__
+from app.asr import AsrClient, AsrError, AsrResult, create_asr_client
 from app.audio.buffer import AudioRingBuffer
-from app.audio.capture import SystemAudioCapture
+from app.audio.capture import AudioChunk, SystemAudioCapture
 from app.audio.vad import SileroOnnxVad, SileroVadSegmenter, VadEventType
 from app.core.config import AppConfig
 from app.core.logging import configure_logging
@@ -28,10 +30,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audio-sample-rate", type=int, default=16000, help="录制采样率。")
     parser.add_argument("--audio-channels", type=int, default=1, help="录制声道数。")
     parser.add_argument("--preview-vad-stream", action="store_true", help="预览系统音频流的 Silero VAD 分段。")
+    parser.add_argument("--transcribe-audio", default=None, help="识别本地 wav 音频文件并输出原文。")
+    parser.add_argument(
+        "--preview-asr-stream",
+        action="store_true",
+        help="预览系统音频流的 VAD 分段和 ASR 识别。",
+    )
     parser.add_argument("--stream-duration", type=float, default=5.0, help="VAD 预览时长，单位秒。")
     parser.add_argument("--chunk-duration", type=float, default=0.5, help="音频流 chunk 时长，单位秒。")
     parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD 语音概率阈值。")
     parser.add_argument("--vad-min-silence-ms", type=int, default=600, help="确认语音结束所需连续静音时长。")
+    parser.add_argument(
+        "--asr-provider",
+        default=None,
+        help="覆盖 ASR 提供方，例如 mock 或 openai-compatible。",
+    )
+    parser.add_argument("--asr-base-url", default=None, help="覆盖真实 ASR 服务基础地址。")
+    parser.add_argument("--asr-model", default=None, help="覆盖真实 ASR 模型名称。")
+    parser.add_argument(
+        "--asr-response-format",
+        default=None,
+        choices=["json", "text", "verbose_json"],
+        help="覆盖 ASR 返回格式。",
+    )
+    parser.add_argument("--asr-timeout", type=float, default=None, help="覆盖 ASR 请求超时时间，单位秒。")
+    parser.add_argument("--asr-language", default=None, help="ASR 识别语言，例如 en。")
+    parser.add_argument("--asr-prompt", default="", help="传给 ASR 的上下文提示词。")
     parser.add_argument(
         "--log-level",
         default=None,
@@ -49,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     config = AppConfig.from_env()
     if args.log_level:
         config = config.with_log_level(args.log_level)
+    config = apply_cli_config_overrides(config, args)
 
     configure_logging(config.log_level)
     logger = logging.getLogger(__name__)
@@ -80,6 +105,25 @@ def main(argv: list[str] | None = None) -> int:
             min_silence_ms=args.vad_min_silence_ms,
         )
 
+    if args.transcribe_audio:
+        return transcribe_audio_file(
+            input_path=Path(args.transcribe_audio),
+            config=config,
+            language=args.asr_language or config.source_language,
+            prompt=args.asr_prompt,
+        )
+
+    if args.preview_asr_stream:
+        return preview_asr_stream(
+            duration_seconds=args.stream_duration,
+            chunk_duration_seconds=args.chunk_duration,
+            threshold=args.vad_threshold,
+            min_silence_ms=args.vad_min_silence_ms,
+            config=config,
+            language=args.asr_language or config.source_language,
+            prompt=args.asr_prompt,
+        )
+
     if not args.no_ui:
         return launch_desktop_app(config)
 
@@ -88,6 +132,23 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("当前翻译提供方：%s", config.translation_provider)
     logger.info("已使用 --no-ui 跳过桌面窗口")
     return 0
+
+
+def apply_cli_config_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
+    updates: dict[str, object] = {}
+    if args.asr_provider:
+        updates["asr_provider"] = args.asr_provider
+    if args.asr_base_url:
+        updates["asr_base_url"] = args.asr_base_url
+    if args.asr_model:
+        updates["asr_model"] = args.asr_model
+    if args.asr_response_format:
+        updates["asr_response_format"] = args.asr_response_format
+    if args.asr_timeout is not None:
+        updates["asr_timeout_seconds"] = args.asr_timeout
+    if not updates:
+        return config
+    return replace(config, **updates)
 
 
 def preview_vad_stream(
@@ -129,6 +190,129 @@ def preview_vad_stream(
             print(f"flush speech_end duration={event.segment.duration_seconds:.2f}s")
     print(f"已处理 {chunk_count} 个音频块，最近缓冲 {buffer.duration_seconds:.2f}s。")
     return 0
+
+
+def transcribe_audio_file(
+    input_path: Path,
+    config: AppConfig,
+    language: str,
+    prompt: str,
+) -> int:
+    try:
+        audio = AudioChunk.from_wav(input_path)
+        client = create_asr_client(config)
+        result = client.transcribe(audio, language=language, prompt=prompt)
+    except (OSError, ValueError, AsrError) as exc:
+        print(f"ASR 识别失败：{exc}", file=sys.stderr)
+        return 2
+
+    print_asr_result(result)
+    return 0
+
+
+def preview_asr_stream(
+    duration_seconds: float,
+    chunk_duration_seconds: float,
+    threshold: float,
+    min_silence_ms: int,
+    config: AppConfig,
+    language: str,
+    prompt: str,
+) -> int:
+    try:
+        client = create_asr_client(config)
+    except AsrError as exc:
+        print(f"ASR 初始化失败：{exc}", file=sys.stderr)
+        return 2
+
+    capture = SystemAudioCapture(sample_rate=16000, channels=1)
+    buffer = AudioRingBuffer(max_duration_seconds=8.0, sample_rate=16000)
+    segmenter = SileroVadSegmenter(
+        vad=SileroOnnxVad(threshold=threshold),
+        min_silence_ms=min_silence_ms,
+    )
+
+    started_at = time.monotonic()
+    chunk_count = 0
+    print("开始预览系统音频 VAD + ASR。")
+    print(
+        f"时长 {duration_seconds:.1f}s，chunk {chunk_duration_seconds:.2f}s，"
+        f"阈值 {threshold:.2f}，ASR {client.provider_name}"
+    )
+
+    for chunk in capture.stream_chunks(chunk_duration_seconds=chunk_duration_seconds):
+        chunk_count += 1
+        buffer.append(chunk)
+        events = segmenter.accept_chunk(chunk)
+        elapsed = time.monotonic() - started_at
+        for event in events:
+            if event.type == VadEventType.SPEECH_START:
+                print(f"{elapsed:6.2f}s speech_start p={event.speech_probability:.3f}")
+            elif event.segment is not None:
+                if not transcribe_segment(
+                    client=client,
+                    segment=event.segment.to_audio_chunk(),
+                    language=language,
+                    prompt=prompt,
+                    prefix=f"{elapsed:6.2f}s",
+                ):
+                    return 2
+
+        if elapsed >= duration_seconds:
+            break
+
+    for event in segmenter.flush():
+        if event.segment is not None:
+            if not transcribe_segment(
+                client=client,
+                segment=event.segment.to_audio_chunk(),
+                language=language,
+                prompt=prompt,
+                prefix="flush",
+            ):
+                return 2
+
+    print(f"已处理 {chunk_count} 个音频块，最近缓冲 {buffer.duration_seconds:.2f}s。")
+    return 0
+
+
+def transcribe_segment(
+    client: AsrClient,
+    segment: AudioChunk,
+    language: str,
+    prompt: str,
+    prefix: str,
+) -> bool:
+    try:
+        result = client.transcribe(segment, language=language, prompt=prompt)
+    except AsrError as exc:
+        print(f"{prefix} ASR 识别失败：{exc}", file=sys.stderr)
+        return False
+
+    text = result.text if result.has_text else "（空结果）"
+    print(f"{prefix} speech_end duration={segment.duration_seconds:.2f}s")
+    print(f"{prefix} asr_text {text}")
+    return True
+
+
+def print_asr_result(result: AsrResult) -> None:
+    mode = "mock" if result.is_mock else result.provider
+    print(f"ASR 提供方：{mode}")
+    print(f"语言：{result.language or 'unknown'}")
+    print(f"音频时长：{result.duration_seconds:.2f}s")
+    print(f"原文：{result.text if result.has_text else '（空结果）'}")
+    if result.segments:
+        print("分段：")
+        for index, segment in enumerate(result.segments, start=1):
+            start = _format_optional_seconds(segment.start_seconds)
+            end = _format_optional_seconds(segment.end_seconds)
+            print(f"  {index}. {start} -> {end} {segment.text}")
+
+
+def _format_optional_seconds(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.2f}s"
 
 
 def list_audio_devices(sample_rate: int, channels: int) -> int:
