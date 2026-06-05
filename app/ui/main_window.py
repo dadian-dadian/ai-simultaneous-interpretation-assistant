@@ -24,6 +24,11 @@ from PySide6.QtWidgets import (
 
 from app.core.config import AppConfig
 from app.core.demo_stream import DemoSubtitleScript, build_default_demo_script
+from app.core.recognition_profile import (
+    RecognitionProfile,
+    get_recognition_profile,
+    recognition_mode_from_index,
+)
 from app.core.subtitle import SubtitleEvent, SubtitleSegment, SubtitleSegmentStatus, SubtitleState
 from app.ui.realtime_worker import RealtimeSubtitleWorker
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
@@ -56,6 +61,12 @@ class MainWindow(QMainWindow):
         self.translation_caption_label: QLabel | None = None
         self.correction_hint_label: QLabel | None = None
         self.history_list: QListWidget | None = None
+        self.recognition_mode_group: QButtonGroup | None = None
+        self.recognition_mode_buttons: list[QPushButton] = []
+        self.latency_hint_label: QLabel | None = None
+        self.dropped_chunks_label: QLabel | None = None
+        self._active_recognition_profile: RecognitionProfile | None = None
+        self._dropped_chunks_warned = False
 
         self.setWindowTitle("AI 同声传译助手")
         self.setMinimumSize(1120, 720)
@@ -168,10 +179,11 @@ class MainWindow(QMainWindow):
 
         controls.addStretch(1)
 
-        latency = QLabel("延迟目标 1.5s")
+        latency = QLabel(get_recognition_profile("balanced").latency_hint)
         latency.setObjectName("MetricPill")
         latency.setAlignment(Qt.AlignmentFlag.AlignCenter)
         latency.setFixedSize(116, 34)
+        self.latency_hint_label = latency
         controls.addWidget(latency)
 
         return controls
@@ -238,7 +250,7 @@ class MainWindow(QMainWindow):
         return section
 
     def _build_mode_section(self) -> QWidget:
-        section = self._section("翻译模式")
+        section = self._section("识别模式")
         layout = section.layout()
 
         button_row = QHBoxLayout()
@@ -246,6 +258,8 @@ class MainWindow(QMainWindow):
 
         group = QButtonGroup(section)
         group.setExclusive(True)
+        self.recognition_mode_group = group
+        self.recognition_mode_buttons = []
         for index, name in enumerate(("低延迟", "均衡", "高准确")):
             button = QPushButton(name)
             button.setObjectName("SegmentButton")
@@ -253,7 +267,9 @@ class MainWindow(QMainWindow):
             button.setMinimumHeight(36)
             button.setChecked(index == 1)
             group.addButton(button)
+            button.clicked.connect(self._update_recognition_mode_hint)
             button_row.addWidget(button)
+            self.recognition_mode_buttons.append(button)
 
         layout.addLayout(button_row)
         return section
@@ -333,6 +349,11 @@ class MainWindow(QMainWindow):
             label.setObjectName("BottomMeta")
             layout.addWidget(label)
 
+        dropped_chunks = QLabel("丢帧：0")
+        dropped_chunks.setObjectName("BottomMeta")
+        self.dropped_chunks_label = dropped_chunks
+        layout.addWidget(dropped_chunks)
+
         layout.addStretch(1)
         return bar
 
@@ -393,13 +414,30 @@ class MainWindow(QMainWindow):
         self._set_transport_running(True)
         self._set_status("启动中")
 
+        profile = self._selected_recognition_profile()
+        self._active_recognition_profile = profile
+        self._dropped_chunks_warned = False
+        self._set_dropped_chunks_display(0)
+        if self.correction_hint_label is not None:
+            self.correction_hint_label.setText(
+                f"识别模式：{profile.label} · VAD {profile.min_silence_ms}ms · "
+                f"回灌 {profile.preroll_seconds:.1f}s"
+            )
+
         thread = QThread(self)
-        worker = RealtimeSubtitleWorker(self.config)
+        worker = RealtimeSubtitleWorker(
+            self.config,
+            vad_min_silence_ms=profile.min_silence_ms,
+            preroll_seconds=profile.preroll_seconds,
+            queue_size=profile.queue_size,
+            dropped_chunks_warn_threshold=profile.dropped_chunks_warn_threshold,
+        )
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
         worker.subtitle_event.connect(self._handle_realtime_subtitle_event)
         worker.status_changed.connect(self._set_status)
+        worker.dropped_chunks_changed.connect(self._handle_dropped_chunks_changed)
         worker.error_occurred.connect(self._handle_realtime_error)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -408,6 +446,7 @@ class MainWindow(QMainWindow):
 
         self.realtime_thread = thread
         self.realtime_worker = worker
+        self._set_recognition_mode_controls_enabled(False)
         thread.start()
 
     def _pause_subtitle_stream(self) -> None:
@@ -447,12 +486,54 @@ class MainWindow(QMainWindow):
     def _handle_realtime_finished(self) -> None:
         self.realtime_thread = None
         self.realtime_worker = None
+        self._active_recognition_profile = None
+        self._set_recognition_mode_controls_enabled(True)
         self._set_transport_running(False)
         if (
             self.status_label is not None
             and self.status_label.text() not in {"异常", "暂停", "待机"}
         ):
             self._set_status("待机")
+
+    def _selected_recognition_profile(self) -> RecognitionProfile:
+        if self.recognition_mode_group is None:
+            return get_recognition_profile("balanced")
+
+        for index, button in enumerate(self.recognition_mode_buttons):
+            if button.isChecked():
+                return get_recognition_profile(recognition_mode_from_index(index))
+        return get_recognition_profile("balanced")
+
+    def _update_recognition_mode_hint(self) -> None:
+        profile = self._selected_recognition_profile()
+        if self.latency_hint_label is not None:
+            self.latency_hint_label.setText(profile.latency_hint)
+
+    def _set_recognition_mode_controls_enabled(self, enabled: bool) -> None:
+        for button in self.recognition_mode_buttons:
+            button.setEnabled(enabled)
+
+    def _set_dropped_chunks_display(self, dropped_chunks: int) -> None:
+        if self.dropped_chunks_label is not None:
+            self.dropped_chunks_label.setText(f"丢帧：{dropped_chunks}")
+
+    def _handle_dropped_chunks_changed(self, dropped_chunks: int) -> None:
+        self._set_dropped_chunks_display(dropped_chunks)
+        profile = self._active_recognition_profile
+        if profile is None or self.correction_hint_label is None:
+            return
+
+        if dropped_chunks < profile.dropped_chunks_warn_threshold:
+            return
+
+        if self._dropped_chunks_warned:
+            return
+
+        self._dropped_chunks_warned = True
+        self.correction_hint_label.setText(
+            f"已丢弃 {dropped_chunks} 个旧音频块，当前识别处理可能跟不上实时音频。"
+            "可尝试切换到高准确模式，或关闭占用 CPU 的程序。"
+        )
 
     def _set_transport_running(self, running: bool) -> None:
         if self.start_button is not None:
@@ -554,6 +635,8 @@ class MainWindow(QMainWindow):
 
     def _reset_realtime_state(self) -> None:
         self.subtitle_state = SubtitleState()
+        self._dropped_chunks_warned = False
+        self._set_dropped_chunks_display(0)
         if self.source_caption_label is not None:
             self.source_caption_label.setText("等待系统音频中的语音。")
         if self.translation_caption_label is not None:

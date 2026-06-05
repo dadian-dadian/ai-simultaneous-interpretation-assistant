@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from app import __version__
@@ -15,6 +15,7 @@ from app.audio.capture import AudioChunk, QueuedAudioCapture, SystemAudioCapture
 from app.audio.vad import SileroOnnxVad, SileroVadSegmenter, VadEventType
 from app.core.config import AppConfig
 from app.core.logging import configure_logging
+from app.core.recognition_profile import RecognitionProfile, get_recognition_profile
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,8 +74,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vad-min-silence-ms",
         type=int,
-        default=600,
-        help="确认语音结束所需连续静音时长。",
+        default=None,
+        help="确认语音结束所需连续静音时长，默认跟随 --recognition-mode。",
+    )
+    parser.add_argument(
+        "--recognition-mode",
+        choices=["low-latency", "balanced", "high-accuracy"],
+        default="balanced",
+        help="识别稳定性预设：低延迟 / 均衡 / 高准确。",
+    )
+    parser.add_argument(
+        "--preroll-seconds",
+        type=float,
+        default=None,
+        help="speech_start 时回灌的历史音频时长，默认跟随 --recognition-mode。",
+    )
+    parser.add_argument(
+        "--audio-queue-size",
+        type=int,
+        default=None,
+        help="实时音频队列容量，默认跟随 --recognition-mode。",
     )
     parser.add_argument(
         "--asr-provider",
@@ -146,11 +165,13 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.preview_vad_stream:
+        recognition = resolve_recognition_settings(args)
         return preview_vad_stream(
             duration_seconds=args.stream_duration,
             chunk_duration_seconds=args.chunk_duration,
             threshold=args.vad_threshold,
-            min_silence_ms=args.vad_min_silence_ms,
+            min_silence_ms=recognition.min_silence_ms,
+            queue_size=recognition.queue_size,
         )
 
     if args.transcribe_audio:
@@ -162,11 +183,14 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.preview_asr_stream:
+        recognition = resolve_recognition_settings(args)
         return preview_asr_stream(
             duration_seconds=args.stream_duration,
             chunk_duration_seconds=args.chunk_duration,
             threshold=args.vad_threshold,
-            min_silence_ms=args.vad_min_silence_ms,
+            min_silence_ms=recognition.min_silence_ms,
+            preroll_seconds=recognition.preroll_seconds,
+            queue_size=recognition.queue_size,
             config=config,
             language=args.asr_language or config.source_language,
             prompt=args.asr_prompt,
@@ -180,6 +204,24 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("当前翻译提供方：%s", config.translation_provider)
     logger.info("已使用 --no-ui 跳过桌面窗口")
     return 0
+
+
+@dataclass(frozen=True)
+class CliRecognitionSettings:
+    profile: RecognitionProfile
+    min_silence_ms: int
+    preroll_seconds: float
+    queue_size: int
+
+
+def resolve_recognition_settings(args: argparse.Namespace) -> CliRecognitionSettings:
+    profile = get_recognition_profile(args.recognition_mode)
+    return CliRecognitionSettings(
+        profile=profile,
+        min_silence_ms=args.vad_min_silence_ms or profile.min_silence_ms,
+        preroll_seconds=args.preroll_seconds or profile.preroll_seconds,
+        queue_size=args.audio_queue_size or profile.queue_size,
+    )
 
 
 def apply_cli_config_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
@@ -204,10 +246,12 @@ def preview_vad_stream(
     chunk_duration_seconds: float,
     threshold: float,
     min_silence_ms: int,
+    queue_size: int = 32,
 ) -> int:
     capture = QueuedAudioCapture(
         SystemAudioCapture(sample_rate=16000, channels=1),
         chunk_duration_seconds=chunk_duration_seconds,
+        max_chunks=queue_size,
     )
     buffer = AudioRingBuffer(max_duration_seconds=8.0, sample_rate=16000)
     segmenter = SileroVadSegmenter(
@@ -282,6 +326,8 @@ def preview_asr_stream(
     chunk_duration_seconds: float,
     threshold: float,
     min_silence_ms: int,
+    preroll_seconds: float,
+    queue_size: int,
     config: AppConfig,
     language: str,
     prompt: str,
@@ -295,6 +341,7 @@ def preview_asr_stream(
     capture = QueuedAudioCapture(
         SystemAudioCapture(sample_rate=16000, channels=1),
         chunk_duration_seconds=chunk_duration_seconds,
+        max_chunks=queue_size,
     )
     buffer = AudioRingBuffer(max_duration_seconds=8.0, sample_rate=16000)
     segmenter = SileroVadSegmenter(
@@ -310,7 +357,8 @@ def preview_asr_stream(
     print("开始预览系统音频 VAD + ASR。")
     print(
         f"时长 {duration_seconds:.1f}s，chunk {chunk_duration_seconds:.2f}s，"
-        f"阈值 {threshold:.2f}，ASR {client.provider_name}"
+        f"VAD {min_silence_ms}ms，回灌 {preroll_seconds:.1f}s，"
+        f"队列 {queue_size}，阈值 {threshold:.2f}，ASR {client.provider_name}"
     )
 
     capture.start()
@@ -334,7 +382,7 @@ def preview_asr_stream(
                     if supports_streaming_asr(client):
                         try:
                             stream_session = client.start_stream(language=language, prompt=prompt)
-                            preroll = buffer.recent(duration_seconds=0.5)
+                            preroll = buffer.recent(duration_seconds=preroll_seconds)
                             stream_events = stream_session.send_audio(preroll)
                         except AsrError as exc:
                             print(

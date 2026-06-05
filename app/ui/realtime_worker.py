@@ -16,6 +16,7 @@ from app.core.subtitle import SubtitleEvent
 class RealtimeSubtitleWorker(QObject):
     subtitle_event = Signal(object)
     status_changed = Signal(str)
+    dropped_chunks_changed = Signal(int)
     error_occurred = Signal(str)
     finished = Signal()
 
@@ -25,17 +26,22 @@ class RealtimeSubtitleWorker(QObject):
         *,
         chunk_duration_seconds: float = 0.16,
         vad_threshold: float = 0.5,
-        vad_min_silence_ms: int = 600,
+        vad_min_silence_ms: int = 800,
+        preroll_seconds: float = 0.8,
         queue_size: int = 32,
+        dropped_chunks_warn_threshold: int = 8,
     ) -> None:
         super().__init__()
         self.config = config
         self.chunk_duration_seconds = chunk_duration_seconds
         self.vad_threshold = vad_threshold
         self.vad_min_silence_ms = vad_min_silence_ms
+        self.preroll_seconds = preroll_seconds
         self.queue_size = queue_size
+        self.dropped_chunks_warn_threshold = dropped_chunks_warn_threshold
         self._stop_event = Event()
         self._queued_capture: QueuedAudioCapture | None = None
+        self._last_reported_dropped_chunks = 0
 
     @Slot()
     def run(self) -> None:
@@ -60,6 +66,8 @@ class RealtimeSubtitleWorker(QObject):
                 max_chunks=self.queue_size,
             )
             self._queued_capture.start()
+            self._last_reported_dropped_chunks = 0
+            self.dropped_chunks_changed.emit(0)
             self.status_changed.emit("监听中")
 
             while not self._stop_event.is_set():
@@ -67,6 +75,7 @@ class RealtimeSubtitleWorker(QObject):
                 if chunk is None:
                     continue
 
+                self._report_dropped_chunks()
                 buffer.append(chunk)
                 vad_events = segmenter.accept_chunk(chunk)
                 current_chunk_sent = False
@@ -85,7 +94,7 @@ class RealtimeSubtitleWorker(QObject):
                                 language=self.config.source_language,
                                 prompt="",
                             )
-                            preroll = buffer.recent(duration_seconds=0.5)
+                            preroll = buffer.recent(duration_seconds=self.preroll_seconds)
                             last_partial_text = self._emit_partial_transcripts(
                                 active_segment_id,
                                 stream_session.send_audio(preroll),
@@ -164,6 +173,15 @@ class RealtimeSubtitleWorker(QObject):
     def _emit_final_text(self, segment_id: str, text: str) -> None:
         display_text = _normalize_asr_text(text) or "（未识别到清晰语音）"
         self.subtitle_event.emit(SubtitleEvent.final(segment_id, display_text, display_text))
+
+    def _report_dropped_chunks(self) -> None:
+        if self._queued_capture is None:
+            return
+        dropped_chunks = self._queued_capture.dropped_chunks
+        if dropped_chunks == self._last_reported_dropped_chunks:
+            return
+        self._last_reported_dropped_chunks = dropped_chunks
+        self.dropped_chunks_changed.emit(dropped_chunks)
 
 
 def supports_streaming_asr(client: AsrClient) -> bool:
