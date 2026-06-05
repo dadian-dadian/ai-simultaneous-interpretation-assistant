@@ -4,11 +4,12 @@ import unittest
 import wave
 from contextlib import redirect_stdout
 from pathlib import Path
+from threading import Event
 from unittest.mock import Mock, patch
 
 import numpy as np
 
-from app.audio.capture import AudioChunk, AudioOutputDevice
+from app.audio.capture import AudioChunk, AudioOutputDevice, SystemAudioCapture
 from app.main import list_audio_devices, record_system_audio
 
 
@@ -72,6 +73,29 @@ class AudioCliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(output_path.exists())
             capture.record_seconds.assert_called_once_with(duration_seconds=1.0)
+
+
+class SystemAudioCaptureStreamTest(unittest.TestCase):
+    def test_stream_chunks_yields_until_stop_event(self) -> None:
+        stop_event = Event()
+        fake_device = Mock()
+        fake_recorder = Mock()
+        fake_recorder.__enter__ = Mock(return_value=fake_recorder)
+        fake_recorder.__exit__ = Mock(return_value=False)
+
+        def record(numframes: int):
+            stop_event.set()
+            return np.zeros((numframes, 1), dtype=np.float32)
+
+        fake_recorder.record.side_effect = record
+        fake_device.recorder.return_value = fake_recorder
+
+        capture = SystemAudioCapture(sample_rate=16000, channels=1)
+        with patch.object(capture, "_get_microphone", return_value=fake_device):
+            chunks = list(capture.stream_chunks(chunk_duration_seconds=0.5, stop_event=stop_event))
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].frames, 8000)
 
 
 if __name__ == "__main__":

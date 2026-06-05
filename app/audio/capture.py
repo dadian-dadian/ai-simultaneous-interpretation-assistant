@@ -3,6 +3,8 @@ from __future__ import annotations
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
+from typing import Iterator
 
 import numpy as np
 import soundcard as sc
@@ -106,6 +108,32 @@ class SystemAudioCapture:
             channels=self.channels,
         )
         return AudioChunk(samples=np.asarray(samples, dtype=np.float32), sample_rate=self.sample_rate)
+
+    def stream_chunks(
+        self,
+        chunk_duration_seconds: float = 0.5,
+        device_id: str | None = None,
+        stop_event: Event | None = None,
+    ) -> Iterator[AudioChunk]:
+        if chunk_duration_seconds <= 0:
+            raise ValueError("chunk_duration_seconds must be greater than 0")
+
+        frames_per_chunk = int(self.sample_rate * chunk_duration_seconds)
+        if frames_per_chunk <= 0:
+            raise ValueError("chunk_duration_seconds is too small for the configured sample rate")
+
+        device = self._get_microphone(device_id)
+        with device.recorder(
+            samplerate=self.sample_rate,
+            channels=self.channels,
+            blocksize=frames_per_chunk,
+        ) as recorder:
+            while stop_event is None or not stop_event.is_set():
+                samples = recorder.record(numframes=frames_per_chunk)
+                yield AudioChunk(
+                    samples=np.asarray(samples, dtype=np.float32),
+                    sample_rate=self.sample_rate,
+                )
 
     def _get_microphone(self, device_id: str | None):
         if device_id:

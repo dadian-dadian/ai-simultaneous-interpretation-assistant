@@ -29,7 +29,7 @@ MVP 阶段优先使用 Python 快速验证核心链路：
 
 - 桌面界面：PySide6 / Qt Quick
 - 系统声音采集：Windows WASAPI Loopback
-- 音频处理：音频切片、重采样、VAD 分段和滑动窗口缓存
+- 音频处理：持续音频流、环形缓冲、Silero VAD 分段和滑动窗口缓存
 - 语音识别：AI ASR 接口或 faster-whisper 适配器
 - 中文翻译：大模型翻译接口
 - 字幕修正：基于上下文的字幕段回写机制
@@ -105,6 +105,9 @@ tests/
 - PySide6：用于构建 Windows 桌面主控制窗口和悬浮字幕窗口。
 - soundcard：用于在 Windows 上枚举系统播放设备，并通过 loopback 捕获系统输出音频。
 - numpy：由音频采集链路使用，用于保存和处理音频采样数据。
+- ONNX Runtime：用于运行 Silero VAD ONNX 模型，进行语音活动检测。
+
+项目内置 `assets/models/silero_vad.onnx`，来源为 Silero VAD 官方仓库。当前 VAD 路线只使用 ONNX Runtime，不引入 PyTorch / torchaudio。
 
 依赖版本通过 `pyproject.toml` 和 `uv.lock` 管理，确保后续评审时可以复现相同环境。后续每次新增第三方库或框架时，将同步更新 README，说明依赖用途和原创功能边界。
 
@@ -161,6 +164,16 @@ uv run python -m app --record-system-audio artifacts/audio/system_capture.wav --
 ```
 
 命令会通过 Windows loopback 捕获当前默认播放设备输出，并保存为 wav 文件。该能力用于验证系统音频链路，后续 ASR 模块会消费同一类音频数据。
+
+### 预览 Silero VAD 分段
+
+播放一段包含人声的系统音频后执行：
+
+```powershell
+uv run python -m app --preview-vad-stream --stream-duration 5
+```
+
+命令会持续捕获系统音频流，并通过 ONNX Runtime + Silero VAD 输出 `speech_start` / `speech_end` 分段事件。
 
 ### 启动无 UI 骨架
 
