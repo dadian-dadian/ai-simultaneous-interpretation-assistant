@@ -24,22 +24,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="store_true", help="显示当前应用版本。")
     parser.add_argument("--show-config", action="store_true", help="打印当前配置并退出。")
-    parser.add_argument("--list-audio-devices", action="store_true", help="列出系统音频捕获设备。")
-    parser.add_argument("--record-system-audio", default=None, help="录制系统音频并保存为 wav 文件。")
-    parser.add_argument("--record-duration", type=float, default=3.0, help="系统音频录制时长，单位秒。")
+    parser.add_argument(
+        "--list-audio-devices",
+        action="store_true",
+        help="列出系统音频捕获设备。",
+    )
+    parser.add_argument(
+        "--record-system-audio",
+        default=None,
+        help="录制系统音频并保存为 wav 文件。",
+    )
+    parser.add_argument(
+        "--record-duration",
+        type=float,
+        default=3.0,
+        help="系统音频录制时长，单位秒。",
+    )
     parser.add_argument("--audio-sample-rate", type=int, default=16000, help="录制采样率。")
     parser.add_argument("--audio-channels", type=int, default=1, help="录制声道数。")
-    parser.add_argument("--preview-vad-stream", action="store_true", help="预览系统音频流的 Silero VAD 分段。")
-    parser.add_argument("--transcribe-audio", default=None, help="识别本地 wav 音频文件并输出原文。")
+    parser.add_argument(
+        "--preview-vad-stream",
+        action="store_true",
+        help="预览系统音频流的 Silero VAD 分段。",
+    )
+    parser.add_argument(
+        "--transcribe-audio",
+        default=None,
+        help="识别本地 wav 音频文件并输出原文。",
+    )
     parser.add_argument(
         "--preview-asr-stream",
         action="store_true",
         help="预览系统音频流的 VAD 分段和 ASR 识别。",
     )
     parser.add_argument("--stream-duration", type=float, default=5.0, help="VAD 预览时长，单位秒。")
-    parser.add_argument("--chunk-duration", type=float, default=0.5, help="音频流 chunk 时长，单位秒。")
-    parser.add_argument("--vad-threshold", type=float, default=0.5, help="Silero VAD 语音概率阈值。")
-    parser.add_argument("--vad-min-silence-ms", type=int, default=600, help="确认语音结束所需连续静音时长。")
+    parser.add_argument(
+        "--chunk-duration",
+        type=float,
+        default=0.5,
+        help="音频流 chunk 时长，单位秒。",
+    )
+    parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=0.5,
+        help="Silero VAD 语音概率阈值。",
+    )
+    parser.add_argument(
+        "--vad-min-silence-ms",
+        type=int,
+        default=600,
+        help="确认语音结束所需连续静音时长。",
+    )
     parser.add_argument(
         "--asr-provider",
         default=None,
@@ -53,7 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["json", "text", "verbose_json"],
         help="覆盖 ASR 返回格式。",
     )
-    parser.add_argument("--asr-timeout", type=float, default=None, help="覆盖 ASR 请求超时时间，单位秒。")
+    parser.add_argument(
+        "--asr-timeout",
+        type=float,
+        default=None,
+        help="覆盖 ASR 请求超时时间，单位秒。",
+    )
     parser.add_argument("--asr-language", default=None, help="ASR 识别语言，例如 en。")
     parser.add_argument("--asr-prompt", default="", help="传给 ASR 的上下文提示词。")
     parser.add_argument(
@@ -167,7 +208,10 @@ def preview_vad_stream(
     started_at = time.monotonic()
     chunk_count = 0
     print("开始预览系统音频 Silero VAD 分段。")
-    print(f"时长 {duration_seconds:.1f}s，chunk {chunk_duration_seconds:.2f}s，阈值 {threshold:.2f}")
+    print(
+        f"时长 {duration_seconds:.1f}s，chunk {chunk_duration_seconds:.2f}s，"
+        f"阈值 {threshold:.2f}"
+    )
 
     for chunk in capture.stream_chunks(chunk_duration_seconds=chunk_duration_seconds):
         chunk_count += 1

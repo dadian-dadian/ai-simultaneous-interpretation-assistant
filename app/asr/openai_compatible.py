@@ -143,8 +143,8 @@ def _encode_multipart(
     for name, value in fields.items():
         chunks.extend(
             [
-                f"--{boundary}\r\n".encode("utf-8"),
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"),
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
                 str(value).encode("utf-8"),
                 b"\r\n",
             ]
@@ -152,15 +152,15 @@ def _encode_multipart(
 
     chunks.extend(
         [
-            f"--{boundary}\r\n".encode("utf-8"),
+            f"--{boundary}\r\n".encode(),
             (
                 f'Content-Disposition: form-data; name="{file.field_name}"; '
                 f'filename="{file.filename}"\r\n'
-            ).encode("utf-8"),
-            f"Content-Type: {file.content_type}\r\n\r\n".encode("utf-8"),
+            ).encode(),
+            f"Content-Type: {file.content_type}\r\n\r\n".encode(),
             file.payload,
             b"\r\n",
-            f"--{boundary}--\r\n".encode("utf-8"),
+            f"--{boundary}--\r\n".encode(),
         ]
     )
     return b"".join(chunks)

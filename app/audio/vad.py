@@ -9,7 +9,6 @@ import onnxruntime as ort
 
 from app.audio.capture import AudioChunk
 
-
 SILERO_SAMPLE_RATE = 16000
 SILERO_FRAME_SIZE = 512
 
@@ -187,7 +186,13 @@ class SileroVadSegmenter:
             return []
 
         segment = self._finish_segment()
-        return [VadSegmentEvent(type=VadEventType.SPEECH_END, segment=segment, speech_probability=probability)]
+        return [
+            VadSegmentEvent(
+                type=VadEventType.SPEECH_END,
+                segment=segment,
+                speech_probability=probability,
+            )
+        ]
 
     def _finish_segment(self) -> SpeechSegment:
         if self._silence_frames > 0:

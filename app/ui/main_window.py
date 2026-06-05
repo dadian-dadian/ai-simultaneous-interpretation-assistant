@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -469,7 +469,9 @@ class MainWindow(QMainWindow):
         if self.translation_caption_label is not None:
             self.translation_caption_label.setText("点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。")
         if self.correction_hint_label is not None:
-            self.correction_hint_label.setText("演示模式：使用内置技术分享字幕脚本，不调用外部 AI 服务。")
+            self.correction_hint_label.setText(
+                "演示模式：使用内置技术分享字幕脚本，不调用外部 AI 服务。"
+            )
         if self.history_list is not None:
             self.history_list.clear()
             self.history_list.addItem("点击“开始”查看模拟字幕历史。")

@@ -10,8 +10,15 @@ class AudioRingBufferTest(unittest.TestCase):
     def test_buffer_keeps_recent_samples_only(self) -> None:
         buffer = AudioRingBuffer(max_duration_seconds=1.0, sample_rate=4)
 
-        buffer.append(AudioChunk(samples=np.array([[1.0], [2.0]], dtype=np.float32), sample_rate=4))
-        buffer.append(AudioChunk(samples=np.array([[3.0], [4.0], [5.0]], dtype=np.float32), sample_rate=4))
+        buffer.append(
+            AudioChunk(samples=np.array([[1.0], [2.0]], dtype=np.float32), sample_rate=4)
+        )
+        buffer.append(
+            AudioChunk(
+                samples=np.array([[3.0], [4.0], [5.0]], dtype=np.float32),
+                sample_rate=4,
+            )
+        )
 
         recent = buffer.recent()
 
@@ -20,7 +27,9 @@ class AudioRingBufferTest(unittest.TestCase):
 
     def test_recent_duration_can_be_limited(self) -> None:
         buffer = AudioRingBuffer(max_duration_seconds=2.0, sample_rate=4)
-        buffer.append(AudioChunk(samples=np.arange(8, dtype=np.float32).reshape(-1, 1), sample_rate=4))
+        buffer.append(
+            AudioChunk(samples=np.arange(8, dtype=np.float32).reshape(-1, 1), sample_rate=4)
+        )
 
         recent = buffer.recent(duration_seconds=0.5)
 

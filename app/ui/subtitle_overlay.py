@@ -64,7 +64,9 @@ class SubtitleOverlayWindow(QWidget):
         self.translation_label = QLabel()
         self.translation_label.setObjectName("OverlayTranslation")
         self.translation_label.setWordWrap(True)
-        self.translation_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.translation_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
 
         self.source_label = QLabel()
         self.source_label.setObjectName("OverlaySource")
@@ -76,7 +78,9 @@ class SubtitleOverlayWindow(QWidget):
 
     def set_sample_caption(self) -> None:
         self.set_caption(
-            source_text="Today we are going to talk about transformer models and inference latency.",
+            source_text=(
+                "Today we are going to talk about transformer models and inference latency."
+            ),
             zh_text="今天我们将讨论 Transformer 模型与推理延迟。",
             state="partial",
         )

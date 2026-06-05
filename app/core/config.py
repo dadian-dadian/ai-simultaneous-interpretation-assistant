@@ -20,7 +20,7 @@ class AppConfig:
     log_level: str = "INFO"
 
     @classmethod
-    def from_env(cls) -> "AppConfig":
+    def from_env(cls) -> AppConfig:
         return cls(
             asr_provider=os.getenv("ASR_PROVIDER", cls.asr_provider),
             asr_api_key=os.getenv("ASR_API_KEY", cls.asr_api_key),
@@ -45,7 +45,7 @@ class AppConfig:
             log_level=os.getenv("LOG_LEVEL", cls.log_level),
         )
 
-    def with_log_level(self, log_level: str) -> "AppConfig":
+    def with_log_level(self, log_level: str) -> AppConfig:
         return AppConfig(
             asr_provider=self.asr_provider,
             asr_api_key=self.asr_api_key,

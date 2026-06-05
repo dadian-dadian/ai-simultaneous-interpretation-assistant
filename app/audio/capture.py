@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import io
 import wave
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Iterator
 
 import numpy as np
 import soundcard as sc
@@ -25,7 +25,7 @@ class AudioChunk:
     sample_rate: int
 
     @classmethod
-    def from_wav(cls, path: str | Path) -> "AudioChunk":
+    def from_wav(cls, path: str | Path) -> AudioChunk:
         source = Path(path)
         with wave.open(str(source), "rb") as wav_file:
             channels = wav_file.getnchannels()
@@ -137,7 +137,10 @@ class SystemAudioCapture:
             samplerate=self.sample_rate,
             channels=self.channels,
         )
-        return AudioChunk(samples=np.asarray(samples, dtype=np.float32), sample_rate=self.sample_rate)
+        return AudioChunk(
+            samples=np.asarray(samples, dtype=np.float32),
+            sample_rate=self.sample_rate,
+        )
 
     def stream_chunks(
         self,

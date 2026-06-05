@@ -68,7 +68,10 @@ class SileroVadSegmenterTest(unittest.TestCase):
     def test_flush_ends_active_segment(self) -> None:
         vad = FakeVad([0.9])
         segmenter = SileroVadSegmenter(vad=vad, speech_pad_ms=0)  # type: ignore[arg-type]
-        chunk = AudioChunk(samples=np.ones((SILERO_FRAME_SIZE, 1), dtype=np.float32), sample_rate=16000)
+        chunk = AudioChunk(
+            samples=np.ones((SILERO_FRAME_SIZE, 1), dtype=np.float32),
+            sample_rate=16000,
+        )
 
         segmenter.accept_chunk(chunk)
         events = segmenter.flush()

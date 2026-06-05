@@ -107,6 +107,10 @@ tests/
 - numpy：由音频采集链路使用，用于保存和处理音频采样数据。
 - ONNX Runtime：用于运行 Silero VAD ONNX 模型，进行语音活动检测。
 
+开发依赖：
+
+- ruff：用于检查 Python 代码风格、导入顺序和常见静态问题，不参与运行时功能。
+
 项目内置 `assets/models/silero_vad.onnx`，来源为 Silero VAD 官方仓库。当前 VAD 路线只使用 ONNX Runtime，不引入 PyTorch / torchaudio。
 
 ASR 真实服务通过 Python 标准库 `urllib` 调用 OpenAI 兼容的 HTTP 转写接口，目前未额外引入 HTTP 第三方库。mock ASR 为本项目自研演示适配器，用于没有 API Key 时验证音频段到原文文本的链路。
@@ -224,6 +228,12 @@ uv run python -m app --no-ui
 
 ```powershell
 uv run python -m unittest discover -s tests
+```
+
+### 运行代码检查
+
+```powershell
+uv run ruff check app tests
 ```
 
 ## 开发规范

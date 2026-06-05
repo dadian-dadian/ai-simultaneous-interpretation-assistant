@@ -29,7 +29,7 @@ class SubtitleEvent:
     reason: str = ""
 
     @classmethod
-    def partial(cls, segment_id: str, source_text: str, zh_text: str) -> "SubtitleEvent":
+    def partial(cls, segment_id: str, source_text: str, zh_text: str) -> SubtitleEvent:
         return cls(
             type=SubtitleEventType.PARTIAL,
             segment_id=segment_id,
@@ -38,7 +38,7 @@ class SubtitleEvent:
         )
 
     @classmethod
-    def final(cls, segment_id: str, source_text: str, zh_text: str) -> "SubtitleEvent":
+    def final(cls, segment_id: str, source_text: str, zh_text: str) -> SubtitleEvent:
         return cls(
             type=SubtitleEventType.FINAL,
             segment_id=segment_id,
@@ -55,7 +55,7 @@ class SubtitleEvent:
         reason: str,
         old_source_text: str = "",
         old_zh_text: str = "",
-    ) -> "SubtitleEvent":
+    ) -> SubtitleEvent:
         return cls(
             type=SubtitleEventType.UPDATE,
             segment_id=segment_id,
@@ -67,7 +67,7 @@ class SubtitleEvent:
         )
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "SubtitleEvent":
+    def from_dict(cls, payload: dict[str, Any]) -> SubtitleEvent:
         return cls(
             type=SubtitleEventType(payload["type"]),
             segment_id=payload["segment_id"],
