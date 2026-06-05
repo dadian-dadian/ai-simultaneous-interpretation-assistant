@@ -70,21 +70,24 @@ class SileroOnnxVad:
 
     def reset(self) -> None:
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._context = np.zeros((1, 64), dtype=np.float32)
 
     def predict(self, frame: np.ndarray) -> VadFrameResult:
         frame_data = np.asarray(frame, dtype=np.float32).reshape(-1)
         if frame_data.shape[0] != SILERO_FRAME_SIZE:
             raise ValueError(f"Silero VAD frame must contain {SILERO_FRAME_SIZE} samples")
 
+        model_input = np.concatenate([self._context, frame_data.reshape(1, -1)], axis=1)
         output, state = self.session.run(
             None,
             {
-                "input": frame_data.reshape(1, -1),
+                "input": model_input,
                 "state": self._state,
                 "sr": np.array(self.sample_rate, dtype=np.int64),
             },
         )
         self._state = state
+        self._context = model_input[:, -64:]
         probability = float(output[0][0])
         return VadFrameResult(
             speech_probability=probability,
