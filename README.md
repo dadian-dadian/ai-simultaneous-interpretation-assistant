@@ -103,6 +103,8 @@ tests/
 当前阶段引入以下依赖：
 
 - PySide6：用于构建 Windows 桌面主控制窗口和悬浮字幕窗口。
+- soundcard：用于在 Windows 上枚举系统播放设备，并通过 loopback 捕获系统输出音频。
+- numpy：由音频采集链路使用，用于保存和处理音频采样数据。
 
 依赖版本通过 `pyproject.toml` 和 `uv.lock` 管理，确保后续评审时可以复现相同环境。后续每次新增第三方库或框架时，将同步更新 README，说明依赖用途和原创功能边界。
 
@@ -143,6 +145,22 @@ uv run python -m app
 ```powershell
 uv run python -m app --show-config
 ```
+
+### 查看系统音频设备
+
+```powershell
+uv run python -m app --list-audio-devices
+```
+
+### 录制系统音频测试文件
+
+播放一段视频、会议或音乐后执行：
+
+```powershell
+uv run python -m app --record-system-audio artifacts/audio/system_capture.wav --record-duration 3
+```
+
+命令会通过 Windows loopback 捕获当前默认播放设备输出，并保存为 wav 文件。该能力用于验证系统音频链路，后续 ASR 模块会消费同一类音频数据。
 
 ### 启动无 UI 骨架
 
