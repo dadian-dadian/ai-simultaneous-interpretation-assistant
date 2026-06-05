@@ -107,6 +107,17 @@ class SubtitleStateTest(unittest.TestCase):
         self.assertEqual(segment.source_text, "finished")
         self.assertEqual(segment.zh_text, "已确认")
 
+    def test_confirmed_segment_accepts_streamed_translation_for_same_source(self) -> None:
+        state = SubtitleState()
+        state.apply(SubtitleEvent.final("seg_001", "finished", "正在翻译..."))
+
+        segment = state.apply(SubtitleEvent.partial("seg_001", "finished", "已确认译文"))
+
+        self.assertEqual(segment.status, SubtitleSegmentStatus.FINAL)
+        self.assertEqual(segment.source_text, "finished")
+        self.assertEqual(segment.zh_text, "已确认译文")
+        self.assertEqual(segment.revisions, [])
+
     def test_state_trims_old_segments(self) -> None:
         state = SubtitleState(max_segments=2)
 

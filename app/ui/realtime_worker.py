@@ -379,9 +379,21 @@ class RealtimeSubtitleWorker(QObject):
         context: tuple[str, ...],
     ) -> None:
         chunks: list[str] = []
+        emitted_zh_text = ""
         try:
             for delta in self._stream_translate_source(source_text, context):
                 chunks.append(delta)
+                zh_text = _normalize_asr_text("".join(chunks))
+                if not zh_text or zh_text == emitted_zh_text:
+                    continue
+                if not self._accept_final_translation_chunk(
+                    segment_id=segment_id,
+                    source_text=source_text,
+                    zh_text=zh_text,
+                ):
+                    return
+                emitted_zh_text = zh_text
+                self.subtitle_event.emit(SubtitleEvent.partial(segment_id, source_text, zh_text))
         except TranslationError as exc:
             self.translation_error_occurred.emit(f"翻译失败：{exc}")
             return
@@ -389,12 +401,13 @@ class RealtimeSubtitleWorker(QObject):
             self.translation_error_occurred.emit(f"翻译线程异常：{exc}")
             return
 
-        self._emit_final_translation_update(
-            segment_id=segment_id,
-            source_text=source_text,
-            old_zh_text=old_zh_text,
-            zh_text=_normalize_asr_text("".join(chunks)),
-        )
+        if not emitted_zh_text:
+            self._emit_final_translation_update(
+                segment_id=segment_id,
+                source_text=source_text,
+                old_zh_text=old_zh_text,
+                zh_text=_normalize_asr_text("".join(chunks)),
+            )
 
     def _accept_partial_translation_chunk(
         self,
@@ -416,6 +429,21 @@ class RealtimeSubtitleWorker(QObject):
                 return None
             self._partial_zh_by_segment[segment_id] = zh_text
             return latest_source
+
+    def _accept_final_translation_chunk(
+        self,
+        *,
+        segment_id: str,
+        source_text: str,
+        zh_text: str,
+    ) -> bool:
+        with self._translation_lock:
+            if self._translation_closed:
+                return False
+            if self._latest_source_by_segment.get(segment_id) != source_text:
+                return False
+            self._partial_zh_by_segment[segment_id] = zh_text
+            return True
 
     def _handle_partial_translation_result(
         self,

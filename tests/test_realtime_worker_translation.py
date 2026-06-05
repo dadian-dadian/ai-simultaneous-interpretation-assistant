@@ -150,6 +150,29 @@ class RealtimeWorkerTranslationTest(unittest.TestCase):
 
         self.assertEqual(events, [])
 
+    def test_stream_final_translation_emits_progressive_confirmed_translation(self) -> None:
+        worker = RealtimeSubtitleWorker(AppConfig(translation_api_key="translation-key"))
+        worker._translator = FakeStreamingTranslator(["这不是", "只为了练习听力。"])
+        events = []
+        worker.subtitle_event.connect(events.append)
+        worker._reset_translation_state()
+        current_zh, context = worker._finalize_segment(
+            "asr_0001",
+            "It's not just for your listening practice.",
+        )
+
+        worker._stream_final_translation(
+            segment_id="asr_0001",
+            source_text="It's not just for your listening practice.",
+            old_zh_text=current_zh,
+            context=context,
+        )
+
+        self.assertEqual(len(events), 2)
+        self.assertTrue(all(event.type == SubtitleEventType.PARTIAL for event in events))
+        self.assertEqual(events[0].zh_text, "这不是")
+        self.assertEqual(events[1].zh_text, "这不是只为了练习听力。")
+
 
 if __name__ == "__main__":
     unittest.main()

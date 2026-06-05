@@ -164,6 +164,11 @@ class SubtitleState:
             segment = SubtitleSegment(segment_id=event.segment_id)
             self._segments[event.segment_id] = segment
         elif segment.status != SubtitleSegmentStatus.PARTIAL:
+            if self._can_apply_confirmed_translation_partial(segment, event):
+                segment.zh_text = event.zh_text
+                segment.version += 1
+                self._touch(event.segment_id)
+                return segment
             return segment
 
         segment.source_text = event.source_text
@@ -209,6 +214,18 @@ class SubtitleState:
         segment.version += 1
         self._touch(event.segment_id)
         return segment
+
+    @staticmethod
+    def _can_apply_confirmed_translation_partial(
+        segment: SubtitleSegment,
+        event: SubtitleEvent,
+    ) -> bool:
+        return (
+            segment.status == SubtitleSegmentStatus.FINAL
+            and event.source_text == segment.source_text
+            and bool(event.zh_text)
+            and event.zh_text != segment.zh_text
+        )
 
     def _touch(self, segment_id: str) -> None:
         self._segments.move_to_end(segment_id)

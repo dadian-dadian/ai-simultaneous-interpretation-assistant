@@ -96,7 +96,7 @@ tests/
 
 ## 当前状态
 
-项目处于核心链路逐步接入阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理、模拟字幕流演示、Windows 系统音频捕获、Silero VAD 分段、百度实时 ASR WebSocket 适配器和 OpenAI-compatible 真实翻译适配器。桌面主流程在 `ASR_PROVIDER=baidu-realtime` 时会启动真实系统音频监听，将百度返回的 `MID_TEXT` 作为临时字幕、`FIN_TEXT` 作为正式字幕接入主窗口与悬浮窗；partial 翻译使用 `stream=true` 流式返回中文增量并实时刷新字幕，final 翻译完成后再用 `segment.update(reason="translation_final")` 回写精修中文字幕。在 `ASR_PROVIDER=mock` 时仍保留内置脚本演示，该演示不调用翻译模型。上下文纠错和术语一致性将在后续 PR 接入。
+项目处于核心链路逐步接入阶段，当前已具备 Python 应用入口、配置读取、基础日志输出、PySide6 主控制窗口、悬浮字幕窗口、字幕事件状态管理、模拟字幕流演示、Windows 系统音频捕获、Silero VAD 分段、百度实时 ASR WebSocket 适配器和 OpenAI-compatible 真实翻译适配器。桌面主流程在 `ASR_PROVIDER=baidu-realtime` 时会启动真实系统音频监听，将百度返回的 `MID_TEXT` 作为临时字幕、`FIN_TEXT` 作为正式字幕接入主窗口与悬浮窗；partial 和 final 翻译都会使用 `stream=true` 流式返回中文增量，final 段在原文稳定后仍可继续刷新中文字幕，避免确认后长时间停留在占位文本。在 `ASR_PROVIDER=mock` 时仍保留内置脚本演示，该演示不调用翻译模型。上下文纠错和术语一致性将在后续 PR 接入。
 
 ## 依赖说明
 
@@ -163,7 +163,7 @@ TRANSLATION_TIMEOUT_SECONDS=30
 uv run python -m app
 ```
 
-当前主窗口提供开始、暂停、停止、状态展示、音频源选择、传译模式和字幕样式等基础界面。配置百度实时 ASR 和真实翻译模型后，点击“开始”会启动系统音频监听、Silero VAD 分段、百度 WebSocket 流式识别和 OpenAI-compatible 流式翻译。`MID_TEXT` 会先更新原文临时字幕，防抖后的 partial 翻译会以中文增量形式持续回写；`FIN_TEXT` 会确认当前字幕段，真实模型返回最终译文后再通过 `segment.update(reason="translation_final")` 回写精修中文字幕。点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。未配置真实 ASR 时，可将 `ASR_PROVIDER` 设为 `mock` 使用内置演示模式；该模式使用写死的双语脚本，不调用真实翻译模型。
+当前主窗口提供开始、暂停、停止、状态展示、音频源选择、传译模式和字幕样式等基础界面。配置百度实时 ASR 和真实翻译模型后，点击“开始”会启动系统音频监听、Silero VAD 分段、百度 WebSocket 流式识别和 OpenAI-compatible 流式翻译。`MID_TEXT` 会先更新原文临时字幕，防抖后的 partial 翻译会以中文增量形式持续回写；`FIN_TEXT` 会确认当前字幕段，final 翻译也会边生成边刷新同一确认段的中文字幕。点击“悬浮字幕”可以单独显示置顶半透明字幕窗口，并支持通过主窗口调整字号、透明度和双语显示模式。未配置真实 ASR 时，可将 `ASR_PROVIDER` 设为 `mock` 使用内置演示模式；该模式使用写死的双语脚本，不调用真实翻译模型。
 
 ### 演示模式
 
