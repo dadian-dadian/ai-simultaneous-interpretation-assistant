@@ -89,39 +89,56 @@ tests/
 
 ## 当前状态
 
-项目处于桌面应用基础搭建阶段，当前已具备 Python 应用入口、配置读取和基础日志输出。后续功能将按照小粒度 PR 持续提交，确保主分支在每次合并后保持可运行或可预览状态。
+项目处于桌面应用基础搭建阶段，当前已具备 Python 应用入口、配置读取、基础日志输出和 PySide6 主控制窗口。后续功能将按照小粒度 PR 持续提交，确保主分支在每次合并后保持可运行或可预览状态。
 
 ## 依赖说明
 
-当前阶段仅使用 Python 标准库，尚未引入实际运行依赖。后续每次新增第三方库或框架时，将同步更新 README，说明依赖用途和原创功能边界。
+当前阶段引入以下依赖：
+
+- PySide6：用于构建 Windows 桌面主控制窗口和后续悬浮字幕窗口。
+
+依赖版本通过 `pyproject.toml` 和 `uv.lock` 管理，确保后续评审时可以复现相同环境。后续每次新增第三方库或框架时，将同步更新 README，说明依赖用途和原创功能边界。
 
 ## 运行方式
 
-当前版本提供基础命令行入口，用于验证应用配置和启动流程。
+当前版本提供基础桌面主窗口和命令行验证入口。
 
 ### 环境要求
 
 - Windows 10 / Windows 11
 - Python 3.11 或更高版本
+- uv
+
+### 安装依赖
+
+```powershell
+uv sync
+```
+
+### 启动主控制窗口
+
+```powershell
+uv run python -m app
+```
+
+当前主窗口提供开始、暂停、停止、状态展示、音频源选择、翻译模式和字幕样式等基础界面。系统音频捕获、悬浮字幕窗口、ASR 和翻译模块将在后续 PR 中接入。
 
 ### 查看配置
 
 ```powershell
-python -m app --show-config
+uv run python -m app --show-config
 ```
 
-### 启动应用骨架
+### 启动无 UI 骨架
 
 ```powershell
-python -m app
+uv run python -m app --no-ui
 ```
-
-当前启动命令只会输出基础日志，桌面 UI、系统音频捕获、ASR 和翻译模块将在后续 PR 中接入。
 
 ### 运行测试
 
 ```powershell
-python -m unittest discover -s tests
+uv run python -m unittest discover -s tests
 ```
 
 ## 开发规范
