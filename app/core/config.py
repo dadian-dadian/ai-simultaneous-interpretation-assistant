@@ -25,7 +25,7 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> AppConfig:
-        load_dotenv(dotenv_path=project_root() / ".env", override=False)
+        load_dotenv(dotenv_path=project_root() / ".env", override=False, encoding="utf-8-sig")
         return cls(
             asr_provider=os.getenv("ASR_PROVIDER", cls.asr_provider),
             asr_app_id=os.getenv("ASR_APP_ID", cls.asr_app_id),
