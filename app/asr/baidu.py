@@ -207,6 +207,15 @@ class BaiduRealtimeAsrSession:
             if item.is_final and item.text
         )
         text = "".join(segment.text for segment in final_segments).strip()
+        if not text:
+            text = next(
+                (
+                    item.text.strip()
+                    for item in reversed(self._transcripts)
+                    if item.text.strip()
+                ),
+                "",
+            )
         return AsrResult(
             text=text,
             language=self.config.language,
@@ -246,6 +255,8 @@ class BaiduRealtimeAsrSession:
 
             err_no = int(payload.get("err_no", 0))
             if err_no != 0:
+                if err_no == -3005 and self._transcripts:
+                    break
                 err_msg = payload.get("err_msg") or "unknown error"
                 if response_type == "START":
                     raise AsrError(f"百度实时 ASR START 失败：err_no={err_no}，{err_msg}")

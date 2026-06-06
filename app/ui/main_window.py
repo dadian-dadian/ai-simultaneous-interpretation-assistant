@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 
 from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -24,13 +26,21 @@ from PySide6.QtWidgets import (
 
 from app.core.config import AppConfig
 from app.core.demo_stream import DemoSubtitleScript, build_default_demo_script
+from app.core.live_caption import LiveCaptionComposer
 from app.core.recognition_profile import (
     RecognitionProfile,
     get_recognition_profile,
     recognition_mode_from_index,
 )
-from app.core.subtitle import SubtitleEvent, SubtitleSegment, SubtitleSegmentStatus, SubtitleState
+from app.core.subtitle import (
+    SubtitleEvent,
+    SubtitleEventType,
+    SubtitleSegment,
+    SubtitleSegmentStatus,
+    SubtitleState,
+)
 from app.ui.realtime_worker import RealtimeSubtitleWorker
+from app.ui.smooth_caption import SmoothCaptionLabel
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
 from app.ui.theme import apply_app_theme
 
@@ -40,11 +50,21 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.subtitle_state = SubtitleState()
+        self.live_caption_composer = LiveCaptionComposer()
         self.demo_script: DemoSubtitleScript = build_default_demo_script()
         self.demo_step_index = 0
         self.demo_timer = QTimer(self)
         self.demo_timer.setSingleShot(True)
         self.demo_timer.timeout.connect(self._advance_demo_stream)
+        self.realtime_render_timer = QTimer(self)
+        self.realtime_render_timer.setSingleShot(True)
+        self.realtime_render_timer.setInterval(80)
+        self.realtime_render_timer.timeout.connect(self._flush_realtime_render)
+        self._pending_realtime_render: tuple[
+            SubtitleEvent,
+            SubtitleSegment,
+            str,
+        ] | None = None
         self.realtime_thread: QThread | None = None
         self.realtime_worker: RealtimeSubtitleWorker | None = None
 
@@ -57,10 +77,11 @@ class MainWindow(QMainWindow):
         self.font_size_slider: QSlider | None = None
         self.opacity_slider: QSlider | None = None
         self.display_mode_combo: QComboBox | None = None
-        self.source_caption_label: QLabel | None = None
-        self.translation_caption_label: QLabel | None = None
+        self.source_caption_label: SmoothCaptionLabel | None = None
+        self.translation_caption_label: SmoothCaptionLabel | None = None
         self.correction_hint_label: QLabel | None = None
         self.history_list: QListWidget | None = None
+        self._history_items: dict[str, QListWidgetItem] = {}
         self.recognition_mode_group: QButtonGroup | None = None
         self.recognition_mode_buttons: list[QPushButton] = []
         self.latency_hint_label: QLabel | None = None
@@ -195,14 +216,21 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(10)
 
-        source = QLabel("等待字幕流启动。")
+        source = SmoothCaptionLabel("等待字幕流启动。")
         source.setObjectName("SourceCaption")
         source.setWordWrap(True)
+        source.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.source_caption_label = source
 
-        translation = QLabel("点击“开始”后，系统将开始监听系统音频或运行内置演示。")
+        translation = SmoothCaptionLabel(
+            "点击“开始”后，系统将开始监听系统音频或运行内置演示。"
+        )
         translation.setObjectName("TranslatedCaption")
         translation.setWordWrap(True)
+        translation.setMinimumHeight(58)
+        translation.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         self.translation_caption_label = translation
 
         correction = QLabel("实时模式：MID_TEXT 会显示为临时字幕，FIN_TEXT 会确认当前字幕。")
@@ -210,8 +238,8 @@ class MainWindow(QMainWindow):
         correction.setWordWrap(True)
         self.correction_hint_label = correction
 
-        layout.addWidget(source)
         layout.addWidget(translation)
+        layout.addWidget(source)
         layout.addWidget(correction)
         layout.addStretch(1)
         return frame
@@ -219,6 +247,11 @@ class MainWindow(QMainWindow):
     def _build_history_list(self) -> QListWidget:
         history = QListWidget()
         history.setObjectName("HistoryList")
+        history.setWordWrap(True)
+        history.setTextElideMode(Qt.TextElideMode.ElideNone)
+        history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        history.setResizeMode(QListView.ResizeMode.Adjust)
+        history.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         history.addItem("点击“开始”查看字幕历史。")
         self.history_list = history
 
@@ -439,6 +472,7 @@ class MainWindow(QMainWindow):
         worker.status_changed.connect(self._set_status)
         worker.dropped_chunks_changed.connect(self._handle_dropped_chunks_changed)
         worker.error_occurred.connect(self._handle_realtime_error)
+        worker.warning_occurred.connect(self._handle_realtime_warning)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -476,10 +510,31 @@ class MainWindow(QMainWindow):
 
     def _handle_realtime_subtitle_event(self, event: SubtitleEvent) -> None:
         segment = self.subtitle_state.apply(event)
-        self._render_subtitle_event(event, segment)
+        display_text = self._compose_realtime_display_text(event, segment)
+        if event.type == SubtitleEventType.PARTIAL:
+            self._pending_realtime_render = (event, segment, display_text)
+            if not self.realtime_render_timer.isActive():
+                self.realtime_render_timer.start()
+            return
+
+        self.realtime_render_timer.stop()
+        self._pending_realtime_render = None
+        self._render_subtitle_event(event, segment, display_text=display_text)
+
+    def _flush_realtime_render(self) -> None:
+        pending = self._pending_realtime_render
+        self._pending_realtime_render = None
+        if pending is None:
+            return
+        event, segment, display_text = pending
+        self._render_subtitle_event(event, segment, display_text=display_text)
 
     def _handle_realtime_error(self, message: str) -> None:
         self._set_status("异常")
+        if self.correction_hint_label is not None:
+            self.correction_hint_label.setText(message)
+
+    def _handle_realtime_warning(self, message: str) -> None:
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText(message)
 
@@ -584,30 +639,85 @@ class MainWindow(QMainWindow):
         step = self.demo_script[self.demo_step_index]
         self.demo_timer.start(step.delay_ms)
 
-    def _render_subtitle_event(self, event: SubtitleEvent, segment: SubtitleSegment) -> None:
+    def _compose_realtime_display_text(
+        self,
+        event: SubtitleEvent,
+        segment: SubtitleSegment,
+    ) -> str:
+        if event.type == SubtitleEventType.PARTIAL:
+            frame = self.live_caption_composer.compose_partial(
+                segment.segment_id,
+                segment.source_text,
+                observed_at=time.monotonic(),
+            )
+        else:
+            frame = self.live_caption_composer.compose_final(
+                segment.segment_id,
+                segment.source_text,
+            )
+        return frame.text
+
+    def _render_subtitle_event(
+        self,
+        event: SubtitleEvent,
+        segment: SubtitleSegment,
+        *,
+        display_text: str | None = None,
+    ) -> None:
+        source_display_text = segment.source_text if display_text is None else display_text
+        has_translation = segment.source_text.strip() != segment.zh_text.strip()
+        translation_display_text = segment.zh_text if has_translation else ""
         if self.source_caption_label is not None:
-            self.source_caption_label.setText(segment.source_text)
+            self.source_caption_label.set_caption_text(
+                source_display_text,
+                animate=False,
+            )
+            self.source_caption_label.setVisible(True)
         if self.translation_caption_label is not None:
-            self.translation_caption_label.setText(segment.zh_text)
+            self.translation_caption_label.set_caption_text(translation_display_text)
         if self.correction_hint_label is not None:
-            self.correction_hint_label.setText(self._build_event_hint(event, segment))
+            hint = self._build_event_hint(event, segment)
+            if hint != self.correction_hint_label.text():
+                self.correction_hint_label.setText(hint)
 
         self.overlay.set_caption(
-            source_text=segment.source_text,
-            zh_text=segment.zh_text,
+            source_text=source_display_text,
+            zh_text=translation_display_text,
             state=segment.status.value,
         )
-        self._render_history()
+        self._render_history_segment(segment)
 
-    def _render_history(self) -> None:
+    def _render_history_segment(self, segment: SubtitleSegment) -> None:
         if self.history_list is None:
             return
 
-        self.history_list.clear()
-        for segment in self.subtitle_state.segments():
-            item = QListWidgetItem(self._format_history_item(segment))
+        item = self._history_items.get(segment.segment_id)
+        is_new = item is None
+        if item is None:
+            if (
+                not self._history_items
+                and self.history_list.count() == 1
+                and self.history_list.item(0).data(Qt.ItemDataRole.UserRole) is None
+            ):
+                self.history_list.clear()
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, segment.segment_id)
             self.history_list.addItem(item)
+            self._history_items[segment.segment_id] = item
+
+        text = self._format_history_item(segment)
+        if item.text() != text:
+            item.setText(text)
+
+        active_ids = {current.segment_id for current in self.subtitle_state.segments()}
+        for stale_id in set(self._history_items) - active_ids:
+            stale_item = self._history_items.pop(stale_id)
+            row = self.history_list.row(stale_item)
+            if row >= 0:
+                self.history_list.takeItem(row)
+
+        if is_new:
+            self.history_list.scrollToBottom()
         self.history_list.scrollToBottom()
 
     def _build_event_hint(self, event: SubtitleEvent, segment: SubtitleSegment) -> str:
@@ -634,17 +744,27 @@ class MainWindow(QMainWindow):
         return f"{state_label}{revision_marker}  {segment.zh_text}\n{segment.source_text}"
 
     def _reset_realtime_state(self) -> None:
+        self.realtime_render_timer.stop()
+        self._pending_realtime_render = None
         self.subtitle_state = SubtitleState()
+        self.live_caption_composer.reset()
         self._dropped_chunks_warned = False
         self._set_dropped_chunks_display(0)
         if self.source_caption_label is not None:
-            self.source_caption_label.setText("等待系统音频中的语音。")
+            self.source_caption_label.set_caption_text(
+                "等待系统音频中的语音。",
+                animate=False,
+            )
         if self.translation_caption_label is not None:
-            self.translation_caption_label.setText("实时 ASR 已准备，识别结果会先以原文字幕展示。")
+            self.translation_caption_label.set_caption_text(
+                "实时 ASR 已准备，识别结果会先以原文字幕展示。",
+                animate=False,
+            )
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText("MID_TEXT 作为临时字幕，FIN_TEXT 作为正式字幕。")
         if self.history_list is not None:
             self.history_list.clear()
+            self._history_items.clear()
             self.history_list.addItem("实时字幕历史将在这里更新。")
         self.overlay.set_caption(
             source_text="等待系统音频中的语音。",
@@ -653,19 +773,29 @@ class MainWindow(QMainWindow):
         )
 
     def _reset_demo_state(self) -> None:
+        self.realtime_render_timer.stop()
+        self._pending_realtime_render = None
         self.subtitle_state = SubtitleState()
+        self.live_caption_composer.reset()
         self.demo_script = build_default_demo_script()
         self.demo_step_index = 0
         if self.source_caption_label is not None:
-            self.source_caption_label.setText("等待模拟字幕流启动。")
+            self.source_caption_label.set_caption_text(
+                "等待模拟字幕流启动。",
+                animate=False,
+            )
         if self.translation_caption_label is not None:
-            self.translation_caption_label.setText("点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。")
+            self.translation_caption_label.set_caption_text(
+                "点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。",
+                animate=False,
+            )
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText(
                 "演示模式：使用内置技术分享字幕脚本，不调用外部 AI 服务。"
             )
         if self.history_list is not None:
             self.history_list.clear()
+            self._history_items.clear()
             self.history_list.addItem("点击“开始”查看模拟字幕历史。")
         self.overlay.set_sample_caption()
 
@@ -675,6 +805,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
         self.demo_timer.stop()
+        self.realtime_render_timer.stop()
         if self.realtime_worker is not None:
             self.realtime_worker.stop()
         if self.realtime_thread is not None and self.realtime_thread.isRunning():
