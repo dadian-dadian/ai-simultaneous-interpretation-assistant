@@ -7,7 +7,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from app.asr import AsrClient, AsrError, create_asr_client
 from app.audio.buffer import AudioRingBuffer
-from app.audio.capture import QueuedAudioCapture, SystemAudioCapture
+from app.audio.capture import AudioChunk, QueuedAudioCapture, SystemAudioCapture
 from app.audio.vad import SileroOnnxVad, SileroVadSegmenter, VadEventType
 from app.core.config import AppConfig
 from app.core.subtitle import SubtitleEvent
@@ -18,6 +18,7 @@ class RealtimeSubtitleWorker(QObject):
     status_changed = Signal(str)
     dropped_chunks_changed = Signal(int)
     error_occurred = Signal(str)
+    warning_occurred = Signal(str)
     finished = Signal()
 
     def __init__(
@@ -115,16 +116,20 @@ class RealtimeSubtitleWorker(QObject):
 
                 if speech_end is not None:
                     if stream_session is not None:
-                        result = stream_session.finish(duration_seconds=stream_duration_seconds)
+                        finishing_session = stream_session
                         stream_session = None
-                        self._emit_final_text(active_segment_id, result.text)
-                    else:
-                        result = client.transcribe(
-                            speech_end.segment.to_audio_chunk(),
-                            language=self.config.source_language,
-                            prompt="",
+                        self._finish_stream_segment(
+                            finishing_session,
+                            segment_id=active_segment_id,
+                            duration_seconds=stream_duration_seconds,
+                            fallback_text=last_partial_text,
                         )
-                        self._emit_final_text(active_segment_id, result.text)
+                    else:
+                        self._transcribe_segment(
+                            client,
+                            segment_id=active_segment_id,
+                            audio=speech_end.segment.to_audio_chunk(),
+                        )
 
                     active_segment_id = ""
                     stream_duration_seconds = 0.0
@@ -173,6 +178,56 @@ class RealtimeSubtitleWorker(QObject):
     def _emit_final_text(self, segment_id: str, text: str) -> None:
         display_text = _normalize_asr_text(text) or "（未识别到清晰语音）"
         self.subtitle_event.emit(SubtitleEvent.final(segment_id, display_text, display_text))
+
+    def _finish_stream_segment(
+        self,
+        stream_session: Any,
+        *,
+        segment_id: str,
+        duration_seconds: float,
+        fallback_text: str,
+    ) -> None:
+        try:
+            result = stream_session.finish(duration_seconds=duration_seconds)
+        except AsrError as exc:
+            normalized_fallback = _normalize_asr_text(fallback_text)
+            stream_session.close()
+            if normalized_fallback:
+                self._emit_final_text(segment_id, normalized_fallback)
+            self.warning_occurred.emit(
+                f"当前语音段未能确认，已继续监听：{exc}"
+            )
+            return
+
+        final_text = _normalize_asr_text(result.text or fallback_text)
+        if not final_text:
+            self.warning_occurred.emit("当前语音段未识别到清晰语音，已继续监听。")
+            return
+        self._emit_final_text(segment_id, final_text)
+
+    def _transcribe_segment(
+        self,
+        client: AsrClient,
+        *,
+        segment_id: str,
+        audio: AudioChunk,
+    ) -> None:
+        try:
+            result = client.transcribe(
+                audio,
+                language=self.config.source_language,
+                prompt="",
+            )
+        except AsrError as exc:
+            self.warning_occurred.emit(
+                f"当前语音段未识别，已继续监听：{exc}"
+            )
+            return
+        final_text = _normalize_asr_text(result.text)
+        if not final_text:
+            self.warning_occurred.emit("当前语音段未识别到清晰语音，已继续监听。")
+            return
+        self._emit_final_text(segment_id, final_text)
 
     def _report_dropped_chunks(self) -> None:
         if self._queued_capture is None:

@@ -71,8 +71,9 @@ def apply_app_theme(app: QApplication) -> None:
         }
 
         QLabel#SourceCaption {
-            color: #9aa7b6;
-            font-size: 16px;
+            color: #7f8b99;
+            font-size: 13px;
+            font-weight: 400;
         }
 
         QLabel#TranslatedCaption {
@@ -93,7 +94,8 @@ def apply_app_theme(app: QApplication) -> None:
         }
 
         QLabel#OverlaySource {
-            color: #c8d2df;
+            color: #8d99a8;
+            font-weight: 400;
         }
 
         QLabel#OverlayHint {

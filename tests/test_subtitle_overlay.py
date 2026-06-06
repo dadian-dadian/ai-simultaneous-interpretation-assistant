@@ -4,7 +4,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.core.config import AppConfig
 from app.core.recognition_profile import get_recognition_profile
-from app.core.subtitle import SubtitleSegmentStatus
+from app.core.subtitle import SubtitleEvent, SubtitleSegmentStatus
 from app.ui.main_window import MainWindow
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
 
@@ -40,6 +40,25 @@ class SubtitleOverlayWindowTest(unittest.TestCase):
         overlay.set_display_mode("source")
         self.assertTrue(overlay.translation_label.isHidden())
         self.assertFalse(overlay.source_label.isHidden())
+
+    def test_bilingual_mode_does_not_duplicate_untranslated_source(self) -> None:
+        overlay = SubtitleOverlayWindow()
+
+        overlay.set_display_mode("bilingual")
+        overlay.set_caption("live English caption", "live English caption")
+
+        self.assertFalse(overlay.translation_label.isHidden())
+        self.assertEqual(overlay.translation_label.text(), "")
+        self.assertFalse(overlay.source_label.isHidden())
+        self.assertEqual(overlay.source_label.text(), "live English caption")
+
+    def test_source_caption_is_visually_secondary(self) -> None:
+        overlay = SubtitleOverlayWindow()
+
+        overlay.set_font_size(28)
+
+        self.assertEqual(overlay.translation_label.font().pointSize(), 28)
+        self.assertLessEqual(overlay.source_label.font().pointSize(), 12)
 
     def test_opacity_is_clamped(self) -> None:
         overlay = SubtitleOverlayWindow()
@@ -98,6 +117,51 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
         self.assertEqual(segment.status, SubtitleSegmentStatus.PARTIAL)
         self.assertIn("Transformer", window.translation_caption_label.text())
         self.assertEqual(window.history_list.count(), 1)
+
+    def test_realtime_caption_limits_long_partial_without_truncating_history(self) -> None:
+        window = MainWindow(AppConfig())
+        words = (
+            "today we're testing a real-time English subtitle system the speaker is talking "
+            "quickly moving from one idea to the next and leaving only short pauses"
+        ).split()
+
+        for index in range(1, len(words) + 1):
+            text = " ".join(words[:index])
+            window._handle_realtime_subtitle_event(
+                SubtitleEvent.partial("asr_0001", text, text)
+            )
+        window._flush_realtime_render()
+
+        display_text = window.source_caption_label.text()
+        history_text = window.history_list.item(0).text()
+        self.assertLessEqual(len(display_text.splitlines()), 2)
+        self.assertIn("only short", display_text)
+        self.assertIn("today we're testing", history_text)
+        self.assertIn("short pauses", history_text)
+        self.assertFalse(window.source_caption_label.isHidden())
+        self.assertFalse(window.translation_caption_label.isHidden())
+        self.assertEqual(window.translation_caption_label.text(), "")
+
+    def test_partial_history_updates_the_existing_item(self) -> None:
+        window = MainWindow(AppConfig())
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.partial("asr_0001", "first words", "first words")
+        )
+        window._flush_realtime_render()
+        item = window.history_list.item(0)
+
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.partial(
+                "asr_0001",
+                "first words continue growing",
+                "first words continue growing",
+            )
+        )
+        window._flush_realtime_render()
+
+        self.assertIs(window.history_list.item(0), item)
+        self.assertEqual(window.history_list.count(), 1)
+        self.assertIn("continue growing", item.text())
 
 
 if __name__ == "__main__":

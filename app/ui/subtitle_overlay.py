@@ -4,6 +4,8 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from app.ui.smooth_caption import SmoothCaptionLabel
+
 
 class SubtitleOverlayWindow(QWidget):
     def __init__(self) -> None:
@@ -12,6 +14,7 @@ class SubtitleOverlayWindow(QWidget):
         self._font_size = 28
         self._opacity_percent = 82
         self._display_mode = "bilingual"
+        self._has_distinct_translation = True
 
         self.setWindowTitle("悬浮字幕")
         self.setWindowFlags(
@@ -20,8 +23,8 @@ class SubtitleOverlayWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setMinimumSize(620, 148)
-        self.resize(780, 172)
+        self.setMinimumSize(700, 204)
+        self.resize(920, 232)
 
         self._build_ui()
         self.set_sample_caption()
@@ -61,16 +64,20 @@ class SubtitleOverlayWindow(QWidget):
         header.addStretch(1)
         header.addWidget(close_button)
 
-        self.translation_label = QLabel()
+        self.translation_label = SmoothCaptionLabel()
         self.translation_label.setObjectName("OverlayTranslation")
         self.translation_label.setWordWrap(True)
         self.translation_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
+        self.translation_label.setMinimumHeight(58)
 
-        self.source_label = QLabel()
+        self.source_label = SmoothCaptionLabel()
         self.source_label.setObjectName("OverlaySource")
         self.source_label.setWordWrap(True)
+        self.source_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
 
         layout.addLayout(header)
         layout.addWidget(self.translation_label)
@@ -92,13 +99,21 @@ class SubtitleOverlayWindow(QWidget):
             "updated": "已修正",
         }.get(state, "实时")
 
-        self.state_badge.setText(state_text)
-        self.source_label.setText(source_text)
-        self.translation_label.setText(zh_text)
+        if self.state_badge.text() != state_text:
+            self.state_badge.setText(state_text)
+        self._has_distinct_translation = (
+            bool(zh_text.strip()) and source_text.strip() != zh_text.strip()
+        )
+        self.source_label.set_caption_text(source_text, animate=False)
+        self.translation_label.set_caption_text(
+            zh_text if self._has_distinct_translation else ""
+        )
+        self._apply_display_mode()
 
-        self.state_badge.setProperty("captionState", state)
-        self.state_badge.style().unpolish(self.state_badge)
-        self.state_badge.style().polish(self.state_badge)
+        if self.state_badge.property("captionState") != state:
+            self.state_badge.setProperty("captionState", state)
+            self.state_badge.style().unpolish(self.state_badge)
+            self.state_badge.style().polish(self.state_badge)
 
     def set_font_size(self, font_size: int) -> None:
         self._font_size = font_size
@@ -108,7 +123,8 @@ class SubtitleOverlayWindow(QWidget):
         self.translation_label.setFont(translation_font)
 
         source_font = QFont(self.source_label.font())
-        source_font.setPointSize(max(11, int(font_size * 0.48)))
+        source_font.setPointSize(max(10, round(font_size * 0.4)))
+        source_font.setWeight(QFont.Weight.Normal)
         self.source_label.setFont(source_font)
 
     def set_opacity_percent(self, opacity_percent: int) -> None:
@@ -117,8 +133,19 @@ class SubtitleOverlayWindow(QWidget):
 
     def set_display_mode(self, display_mode: str) -> None:
         self._display_mode = display_mode
-        self.source_label.setVisible(display_mode in {"bilingual", "source"})
-        self.translation_label.setVisible(display_mode in {"bilingual", "zh"})
+        self._apply_display_mode()
+
+    def _apply_display_mode(self) -> None:
+        if self._display_mode == "source":
+            self.source_label.setVisible(True)
+            self.translation_label.setVisible(False)
+            return
+
+        self.translation_label.setVisible(True)
+        self.source_label.setVisible(
+            self._display_mode == "bilingual"
+            and (self._has_distinct_translation or bool(self.source_label.text().strip()))
+        )
 
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         if event.button() == Qt.MouseButton.LeftButton:

@@ -105,6 +105,23 @@ class BaiduRealtimeAsrClientTest(unittest.TestCase):
         self.assertEqual(json.loads(fake_ws.text_frames[-1])["type"], "FINISH")
         self.assertEqual(result.text, "hello")
 
+    def test_no_effective_speech_after_partial_uses_latest_partial(self) -> None:
+        audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
+        fake_ws = FakeWebSocket(
+            messages=[
+                '{"type":"MID_TEXT","err_no":0,"result":"some people do this exercise"}',
+                '{"type":"ERROR","err_no":-3005,'
+                '"err_msg":"asr server not find effective speech[info:-4]"}',
+            ]
+        )
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
+
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            result = client.transcribe(audio, language="en")
+
+        self.assertEqual(result.text, "some people do this exercise")
+        self.assertTrue(fake_ws.closed)
+
     def test_client_raises_clear_error_for_start_failure(self) -> None:
         audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
         fake_ws = FakeWebSocket(messages=['{"type":"START","err_no":3301,"err_msg":"bad key"}'])
