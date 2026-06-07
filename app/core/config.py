@@ -26,6 +26,7 @@ class AppConfig:
     source_language: str = "en"
     target_language: str = "zh-CN"
     subtitle_mode: str = "bilingual"
+    transcript_storage_dir: str = ""
     log_level: str = "INFO"
 
     @classmethod
@@ -74,6 +75,10 @@ class AppConfig:
             source_language=os.getenv("SOURCE_LANGUAGE", cls.source_language),
             target_language=os.getenv("TARGET_LANGUAGE", cls.target_language),
             subtitle_mode=os.getenv("SUBTITLE_MODE", cls.subtitle_mode),
+            transcript_storage_dir=os.getenv(
+                "TRANSCRIPT_STORAGE_DIR",
+                cls.transcript_storage_dir,
+            ),
             log_level=os.getenv("LOG_LEVEL", cls.log_level),
         )
 
@@ -100,6 +105,7 @@ class AppConfig:
             source_language=self.source_language,
             target_language=self.target_language,
             subtitle_mode=self.subtitle_mode,
+            transcript_storage_dir=self.transcript_storage_dir,
             log_level=log_level,
         )
 
@@ -128,6 +134,7 @@ class AppConfig:
             "source_language": self.source_language,
             "target_language": self.target_language,
             "subtitle_mode": self.subtitle_mode,
+            "transcript_storage_dir": self.transcript_storage_dir,
             "log_level": self.log_level,
         }
 
@@ -152,4 +159,3 @@ def _env_float(name: str, default: float) -> float:
         return float(raw_value)
     except ValueError:
         return default
-

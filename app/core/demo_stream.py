@@ -34,74 +34,74 @@ def build_default_demo_script() -> DemoSubtitleScript:
                 delay_ms=350,
                 event=SubtitleEvent.partial(
                     "seg_001",
-                    "Today we are going to talk about transformer models",
-                    "今天我们将讨论 Transformer 模型……",
+                    "Good morning everyone and thank you for joining us",
+                    "大家早上好，感谢各位参加今天的分享……",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=900,
                 event=SubtitleEvent.final(
                     "seg_001",
-                    "Today we are going to talk about transformer models and inference latency.",
-                    "今天我们将讨论 Transformer 模型与推理延迟。",
+                    "Good morning everyone, and thank you for joining us today.",
+                    "大家早上好，感谢各位参加今天的分享。",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=850,
                 event=SubtitleEvent.partial(
                     "seg_002",
-                    "I study AI agents",
-                    "我研究 AI 代理……",
+                    "We will begin with the progress from this quarter",
+                    "我们先回顾本季度的工作进展……",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=850,
                 event=SubtitleEvent.final(
                     "seg_002",
-                    "I study AI agents.",
-                    "我研究 AI 代理。",
+                    "We will begin with the progress from this quarter.",
+                    "我们先回顾本季度的工作进展。",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=1000,
                 event=SubtitleEvent.partial(
                     "seg_003",
-                    "They can use tools and complete tasks automatically",
-                    "它们可以使用工具并自动完成任务……",
+                    "Then we will look at the priorities for the coming month",
+                    "接下来，我们会介绍下个月的重点安排……",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=900,
                 event=SubtitleEvent.update(
                     "seg_002",
-                    "I study AI agents.",
-                    "我研究 AI 智能体。",
-                    reason="terminology_consistency",
-                    old_zh_text="我研究 AI 代理。",
+                    "We will begin with the progress from this quarter.",
+                    "首先，我们回顾本季度的工作进展。",
+                    reason="context_correction",
+                    old_zh_text="我们先回顾本季度的工作进展。",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=850,
                 event=SubtitleEvent.final(
                     "seg_003",
-                    "They can use tools and complete tasks automatically.",
-                    "它们可以使用工具并自动完成任务。",
+                    "Then we will look at the priorities for the coming month.",
+                    "接下来，我们会介绍下个月的重点安排。",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=900,
                 event=SubtitleEvent.partial(
                     "seg_004",
-                    "The key challenge is reducing latency without losing context",
-                    "关键挑战是在不丢失上下文的情况下降低延迟……",
+                    "Please save your questions until the discussion at the end",
+                    "请将问题留到最后的交流环节……",
                 ),
             ),
             DemoSubtitleStep(
                 delay_ms=900,
                 event=SubtitleEvent.final(
                     "seg_004",
-                    "The key challenge is reducing latency without losing context.",
-                    "关键挑战是在不丢失上下文的情况下降低延迟。",
+                    "Please save your questions until the discussion at the end.",
+                    "请将问题留到最后的交流环节。",
                 ),
             ),
         ]

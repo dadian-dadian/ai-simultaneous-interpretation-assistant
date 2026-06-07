@@ -1,10 +1,11 @@
+import tempfile
 import threading
 import unittest
 from time import perf_counter
 
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from app.core.config import AppConfig
 from app.core.recognition_profile import get_recognition_profile
@@ -54,7 +55,17 @@ class SubtitleOverlayWindowTest(unittest.TestCase):
 
         self.assertEqual(overlay.source_label.text(), "hello")
         self.assertEqual(overlay.translation_label.text(), "你好")
-        self.assertEqual(overlay.state_badge.text(), "已修正")
+
+    def test_sample_caption_uses_product_empty_state_without_blank_source_bar(
+        self,
+    ) -> None:
+        overlay = SubtitleOverlayWindow()
+        overlay.show()
+        self.app.processEvents()
+
+        self.assertEqual(overlay.translation_label.text(), "字幕窗口已就绪")
+        self.assertEqual(overlay.source_label.text(), "")
+        self.assertFalse(overlay.source_bar.isVisible())
 
     def test_two_chinese_sentences_use_independent_display_slots(self) -> None:
         overlay = SubtitleOverlayWindow()
@@ -67,7 +78,6 @@ class SubtitleOverlayWindowTest(unittest.TestCase):
 
         self.assertEqual(overlay.translation_stable_label.text(), "第一句已经稳定。")
         self.assertEqual(overlay.translation_label.text(), "第二句仍在更新")
-        self.assertEqual(overlay.state_badge.text(), "确认中")
         self.assertEqual(
             overlay.translation_stable_label.font().pointSize(),
             overlay.translation_label.font().pointSize(),
@@ -95,7 +105,7 @@ class SubtitleOverlayWindowTest(unittest.TestCase):
             [label.text() for label in visible_labels],
             ["第一句。", "第二句。", "让我们开始——什么是财富"],
         )
-        self.assertEqual(overlay.translation_layout.spacing(), 2)
+        self.assertEqual(overlay.translation_layout.spacing(), 8)
         for previous, current in zip(
             visible_labels,
             visible_labels[1:],
@@ -103,7 +113,7 @@ class SubtitleOverlayWindowTest(unittest.TestCase):
         ):
             self.assertEqual(
                 current.y() - (previous.y() + previous.height()),
-                2,
+                8,
             )
         overlay.close()
 
@@ -333,8 +343,8 @@ class SubtitleOverlayWindowTest(unittest.TestCase):
         overlay.set_font_size(18)
 
         self.assertEqual(overlay.translation_label.font().pointSize(), 18)
-        self.assertGreaterEqual(overlay.source_label.font().pointSize(), 8)
-        self.assertLessEqual(overlay.source_label.font().pointSize(), 9)
+        self.assertGreaterEqual(overlay.source_label.font().pointSize(), 12)
+        self.assertLessEqual(overlay.source_label.font().pointSize(), 13)
         self.assertLess(
             overlay.source_label.font().pointSize(),
             overlay.translation_label.font().pointSize(),
@@ -343,28 +353,46 @@ class SubtitleOverlayWindowTest(unittest.TestCase):
     def test_overlay_defaults_to_a_compact_caption_ribbon(self) -> None:
         overlay = SubtitleOverlayWindow()
 
-        self.assertEqual((overlay.width(), overlay.height()), (680, 190))
+        self.assertEqual((overlay.width(), overlay.height()), (700, 210))
         self.assertEqual(overlay.translation_label.font().pointSize(), 14)
-        self.assertGreaterEqual(overlay.source_label.font().pointSize(), 8)
-        self.assertLessEqual(overlay.source_label.font().pointSize(), 9)
+        self.assertEqual(overlay.source_label.font().pointSize(), 10)
         self.assertEqual(
             overlay.translation_stable_label.font().pointSize(),
             overlay.translation_label.font().pointSize(),
         )
-        self.assertTrue(overlay.header.isHidden())
+        self.assertFalse(overlay.close_button.isHidden())
         self.assertTrue(overlay.resize_grip.isHidden())
         self.assertEqual(overlay.maximumHeight(), 16_777_215)
         self.assertGreater(overlay.translation_label.maximumHeight(), 1_000)
+
+    def test_overlay_places_close_button_at_top_right_without_header_text(
+        self,
+    ) -> None:
+        overlay = SubtitleOverlayWindow()
+        overlay.show()
+        self.app.processEvents()
+
+        self.assertIs(overlay.close_button.parentWidget(), overlay.container)
+        self.assertEqual(
+            overlay.container.width() - overlay.close_button.geometry().right() - 1,
+            8,
+        )
+        self.assertEqual(overlay.close_button.y(), 8)
+        self.assertEqual(overlay.close_button.toolTip(), "关闭字幕窗")
+        self.assertIsNone(overlay.findChild(QLabel, "OverlayStateBadge"))
+        self.assertIsNone(overlay.findChild(QLabel, "OverlayHint"))
+        self.assertFalse(overlay.source_language.isHidden())
+        overlay.close()
 
     def test_overlay_size_presets_and_manual_resize_are_available(self) -> None:
         overlay = SubtitleOverlayWindow()
 
         overlay.set_size_preset("wide")
-        self.assertEqual((overlay.width(), overlay.height()), (1080, 260))
+        self.assertEqual((overlay.width(), overlay.height()), (1100, 280))
 
         overlay.resize(740, 162)
         self.assertEqual((overlay.width(), overlay.height()), (740, 162))
-        self.assertEqual((overlay.minimumWidth(), overlay.minimumHeight()), (480, 140))
+        self.assertEqual((overlay.minimumWidth(), overlay.minimumHeight()), (500, 160))
 
     def test_opacity_is_clamped(self) -> None:
         overlay = SubtitleOverlayWindow()
@@ -409,11 +437,11 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
         window = MainWindow(AppConfig())
 
         self.assertEqual(window.overlay_size_combo.currentIndex(), 0)
-        self.assertEqual((window.overlay.width(), window.overlay.height()), (680, 190))
+        self.assertEqual((window.overlay.width(), window.overlay.height()), (700, 210))
 
         window.overlay_size_combo.setCurrentIndex(1)
 
-        self.assertEqual((window.overlay.width(), window.overlay.height()), (860, 260))
+        self.assertEqual((window.overlay.width(), window.overlay.height()), (880, 280))
 
         window._show_overlay()
         window.overlay.resize(740, 162)
@@ -438,7 +466,7 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
         window._handle_dropped_chunks_changed(8)
 
         self.assertEqual(window.dropped_chunks_label.text(), "丢帧：8")
-        self.assertIn("识别处理可能跟不上", window.correction_hint_label.text())
+        self.assertIn("字幕可能会有短暂延迟", window.correction_hint_label.text())
 
     def test_stale_realtime_worker_events_are_ignored(self) -> None:
         window = MainWindow(AppConfig())
@@ -506,7 +534,7 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(segment)
         assert segment is not None
         self.assertEqual(segment.status, SubtitleSegmentStatus.PARTIAL)
-        self.assertIn("Transformer", window.translation_caption_label.text())
+        self.assertIn("参加今天的分享", window.translation_caption_label.text())
         self.assertEqual(window.history_list.count(), 1)
 
     def test_realtime_caption_limits_long_partial_without_truncating_history(self) -> None:
@@ -543,6 +571,13 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
         self.assertIsNone(window.findChild(QWidget, "BottomBar"))
         self.assertTrue(
             bool(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        )
+        self.assertNotIn(
+            "字幕窗可拖动移动",
+            " ".join(
+                label.text()
+                for label in window.findChildren(QLabel)
+            ),
         )
 
     def test_realtime_sentence_partial_keeps_previous_final_as_context(self) -> None:
@@ -827,6 +862,155 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
         )
         self.assertIn("第一句译文。", window.overlay.translation_label.text())
 
+    def test_new_untranslated_source_does_not_show_previous_translation_as_active(
+        self,
+    ) -> None:
+        window = MainWindow(AppConfig())
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.final(
+                "asr_0001_s0001",
+                "Previous source.",
+                "Previous source.",
+            )
+        )
+        previous = window.subtitle_state.get("asr_0001_s0001")
+        self.assertIsNotNone(previous)
+        assert previous is not None
+        window._handle_translation_update(
+            TranslationUpdate(
+                segment_id=previous.segment_id,
+                source_version=previous.version,
+                source_text=previous.source_text,
+                translated_text="上一句已经完成。",
+                source_language="en",
+                target_language="zh-CN",
+                provider="baidu-mt",
+                is_final=True,
+            )
+        )
+
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.partial(
+                "asr_0001_s0002",
+                "Current source is still growing",
+                "Current source is still growing",
+            )
+        )
+        window._flush_realtime_render()
+
+        self.assertEqual(
+            window.translation_stable_caption_label.text(),
+            "上一句已经完成。",
+        )
+        self.assertEqual(window.translation_caption_label.text(), "")
+        self.assertEqual(window.overlay.source_label.text(), "Current source is still growing")
+        visible_labels = [
+            label
+            for label in window.overlay._sentence_labels
+            if not label.isHidden()
+        ]
+        self.assertEqual([label.text() for label in visible_labels], ["上一句已经完成。"])
+        self.assertTrue(
+            bool(visible_labels[0].property("captionCompleted"))
+        )
+
+    def test_delayed_old_translation_keeps_latest_translation_active(self) -> None:
+        window = MainWindow(AppConfig())
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.final(
+                "asr_0001_s0001",
+                "Earlier source.",
+                "Earlier source.",
+            )
+        )
+        earlier = window.subtitle_state.get("asr_0001_s0001")
+        self.assertIsNotNone(earlier)
+        assert earlier is not None
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.partial(
+                "asr_0001_s0002",
+                "Current source",
+                "Current source",
+            )
+        )
+        current = window.subtitle_state.get("asr_0001_s0002")
+        self.assertIsNotNone(current)
+        assert current is not None
+        window._handle_translation_update(
+            TranslationUpdate(
+                segment_id=current.segment_id,
+                source_version=current.version,
+                source_text=current.source_text,
+                translated_text="当前句正在翻译",
+                source_language="en",
+                target_language="zh-CN",
+                provider="baidu-mt",
+                is_final=False,
+            )
+        )
+
+        window._handle_translation_update(
+            TranslationUpdate(
+                segment_id=earlier.segment_id,
+                source_version=earlier.version,
+                source_text=earlier.source_text,
+                translated_text="较早句子的迟到翻译。",
+                source_language="en",
+                target_language="zh-CN",
+                provider="baidu-mt",
+                is_final=True,
+            )
+        )
+
+        self.assertEqual(window.overlay.source_label.text(), "Current source")
+        self.assertEqual(window.overlay.translation_label.text(), "当前句正在翻译")
+        self.assertEqual(
+            window.translation_stable_caption_label.text(),
+            "较早句子的迟到翻译。",
+        )
+
+    def test_delayed_old_translation_does_not_rewind_final_latest_source(
+        self,
+    ) -> None:
+        window = MainWindow(AppConfig())
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.final(
+                "asr_0001_s0001",
+                "Earlier source.",
+                "Earlier source.",
+            )
+        )
+        earlier = window.subtitle_state.get("asr_0001_s0001")
+        self.assertIsNotNone(earlier)
+        assert earlier is not None
+        window._handle_realtime_subtitle_event(
+            SubtitleEvent.final(
+                "asr_0001_s0002",
+                "Latest source.",
+                "Latest source.",
+            )
+        )
+
+        window._handle_translation_update(
+            TranslationUpdate(
+                segment_id=earlier.segment_id,
+                source_version=earlier.version,
+                source_text=earlier.source_text,
+                translated_text="较早句子的迟到翻译。",
+                source_language="en",
+                target_language="zh-CN",
+                provider="baidu-mt",
+                is_final=True,
+            )
+        )
+
+        self.assertEqual(window.overlay.source_label.text(), "Latest source.")
+        self.assertEqual(window.translation_caption_label.text(), "")
+        self.assertEqual(
+            window.translation_stable_caption_label.text(),
+            "较早句子的迟到翻译。",
+        )
+
     def test_overlay_keeps_last_two_translations_when_current_source_is_untranslated(
         self,
     ) -> None:
@@ -928,6 +1112,86 @@ class MainWindowOverlayIntegrationTest(unittest.TestCase):
             "The source sentence.\n对应的中文翻译。",
         )
         self.assertNotIn("确认", window.history_list.item(0).text())
+
+    def test_stopping_demo_keeps_current_session_visible_and_persists_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            window = MainWindow(AppConfig(transcript_storage_dir=tmp_dir))
+            try:
+                window._start_demo_stream()
+                window.demo_timer.stop()
+                current_session = window._current_transcript_session
+                self.assertIsNotNone(current_session)
+                assert current_session is not None
+                visible_count = window.history_list.count()
+
+                window._stop_demo_stream()
+
+                self.assertEqual(window.history_list.count(), visible_count)
+                restored = window.transcript_store.load_session(
+                    current_session.session_id
+                )
+                self.assertIsNotNone(restored)
+                assert restored is not None
+                self.assertEqual(restored.status.value, "stopped")
+                self.assertEqual(len(restored.segments), visible_count)
+            finally:
+                window.close()
+                self.app.processEvents()
+
+    def test_paused_demo_resumes_the_same_transcript_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            window = MainWindow(AppConfig(transcript_storage_dir=tmp_dir))
+            try:
+                window._start_demo_stream()
+                window.demo_timer.stop()
+                current_session = window._current_transcript_session
+                self.assertIsNotNone(current_session)
+                assert current_session is not None
+                session_id = current_session.session_id
+                first_version = current_session.segments[0].version
+
+                window._pause_transcript_session()
+                window._start_demo_stream()
+                window.demo_timer.stop()
+
+                self.assertEqual(
+                    window._current_transcript_session.session_id,
+                    session_id,
+                )
+                self.assertGreater(
+                    window._current_transcript_session.segments[0].version,
+                    first_version,
+                )
+            finally:
+                window.close()
+                self.app.processEvents()
+
+    def test_saved_session_can_be_reopened_in_history_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = AppConfig(transcript_storage_dir=tmp_dir)
+            first_window = MainWindow(config)
+            first_window._start_demo_stream()
+            first_window.demo_timer.stop()
+            first_window._stop_demo_stream()
+            expected_text = first_window.history_list.item(0).text()
+            first_window.close()
+            self.app.processEvents()
+
+            second_window = MainWindow(config)
+            try:
+                second_window._set_history_view_mode("saved")
+
+                self.assertFalse(second_window.history_session_combo.isHidden())
+                self.assertEqual(second_window.history_session_combo.count(), 1)
+                self.assertEqual(
+                    second_window.history_list.item(0).text(),
+                    expected_text,
+                )
+            finally:
+                second_window.close()
+                self.app.processEvents()
 
 
 if __name__ == "__main__":

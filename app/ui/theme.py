@@ -325,15 +325,19 @@ def apply_app_theme(app: QApplication) -> None:
         }
 
         QFrame#OverlayContainer {
-            background: rgba(22, 29, 28, 244);
-            border: 1px solid rgba(116, 137, 131, 150);
-            border-radius: 10px;
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 1, y2: 1,
+                stop: 0 rgba(251, 252, 250, 250),
+                stop: 1 rgba(242, 246, 248, 250)
+            );
+            border: 1px solid rgba(154, 168, 178, 150);
+            border-radius: 14px;
         }
 
-        QFrame#OverlayHeader,
-        QFrame#OverlayTranslationBlock {
-            background: transparent;
+        QFrame#OverlaySourceBar {
+            background: rgba(96, 119, 137, 10);
             border: 0;
+            border-radius: 6px;
         }
 
         QScrollArea#OverlayTranslationScroll,
@@ -344,71 +348,60 @@ def apply_app_theme(app: QApplication) -> None:
         }
 
         QFrame#OverlayDivider {
-            background: rgba(162, 178, 173, 48);
+            background: rgba(112, 128, 139, 46);
             border: 0;
         }
 
         QLabel#OverlayTranslation {
-            color: #f1f5f3;
+            color: #26343a;
             font-weight: 500;
         }
 
         QLabel#OverlayTranslation[captionCompleted="true"],
         QLabel#OverlayTranslationCompleted {
-            color: #95a39f;
-            font-weight: 500;
-        }
-
-        QLabel#OverlaySource {
-            color: #7f908a;
+            color: #8b989d;
             font-weight: 400;
         }
 
-        QLabel#OverlayHint {
-            color: #7f8f8a;
-            font-size: 10px;
-            font-weight: 500;
+        QLabel#OverlaySource {
+            color: #647984;
+            font-weight: 400;
         }
 
-        QLabel#OverlayStateBadge {
-            background: rgba(96, 190, 164, 28);
-            border: 1px solid rgba(105, 204, 177, 105);
-            border-radius: 11px;
-            color: #83d5be;
-            font-size: 10px;
+        QLabel#OverlaySourceLanguage {
+            background: rgba(91, 119, 137, 13);
+            border: 1px solid rgba(105, 130, 145, 42);
+            border-radius: 5px;
+            color: #768b96;
+            font-size: 9px;
             font-weight: 700;
         }
 
-        QLabel#OverlayStateBadge[captionState="final"],
-        QLabel#OverlayStateBadge[captionState="updated"] {
-            background: rgba(112, 164, 207, 28);
-            border-color: rgba(119, 175, 218, 100);
-            color: #91bfe2;
-        }
-
-        QLabel#OverlayStateBadge[captionState="finalizing"] {
-            background: rgba(211, 161, 87, 28);
-            border-color: rgba(218, 170, 96, 105);
-            color: #e0b574;
-        }
-
         QPushButton#OverlayCloseButton {
-            background: transparent;
-            border: 0;
-            border-radius: 6px;
-            color: #768680;
+            background: rgba(255, 255, 255, 160);
+            border: 1px solid rgba(126, 144, 154, 48);
+            border-radius: 8px;
+            color: #7e8d94;
+            font-size: 17px;
+            font-weight: 400;
             padding: 0;
         }
 
         QPushButton#OverlayCloseButton:hover {
-            background: rgba(255, 255, 255, 18);
-            color: #eef3f1;
+            background: rgba(229, 96, 91, 20);
+            border-color: rgba(205, 97, 91, 65);
+            color: #b85f59;
+        }
+
+        QPushButton#OverlayCloseButton:pressed {
+            background: rgba(229, 96, 91, 34);
+            color: #9f4d48;
         }
 
         QSizeGrip#OverlayResizeGrip {
             background: transparent;
-            border-right: 2px solid rgba(141, 162, 155, 120);
-            border-bottom: 2px solid rgba(141, 162, 155, 120);
+            border-right: 2px solid rgba(111, 132, 143, 100);
+            border-bottom: 2px solid rgba(111, 132, 143, 100);
         }
         """
     )

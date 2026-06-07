@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 import uuid
+from datetime import datetime
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QIcon
@@ -40,6 +41,15 @@ from app.core.subtitle import (
     SubtitleSegment,
     SubtitleSegmentStatus,
     SubtitleState,
+)
+from app.core.transcript_session import (
+    TranscriptSession,
+    TranscriptSessionStatus,
+)
+from app.storage import (
+    TranscriptPersistence,
+    TranscriptStore,
+    default_transcript_storage_dir,
 )
 from app.translate import (
     IncrementalTranslationPlanner,
@@ -169,7 +179,11 @@ class _HistoryItemWidget(QWidget):
 
 
 class _HistoryEmptyWidget(QWidget):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        title_text: str = "还没有转译内容",
+        subtitle_text: str = "开始转译后，中英文内容会按时间顺序保存在这里",
+    ) -> None:
         super().__init__()
         self.setObjectName("HistoryEmpty")
 
@@ -188,11 +202,11 @@ class _HistoryEmptyWidget(QWidget):
         mark_row.addWidget(mark)
         mark_row.addStretch(1)
 
-        title = QLabel("等待声音输入")
+        title = QLabel(title_text)
         title.setObjectName("HistoryEmptyTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        subtitle = QLabel("开始转译后，中文与英文上下文会连续记录在这里")
+        subtitle = QLabel(subtitle_text)
         subtitle.setObjectName("HistoryEmptySubtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
@@ -215,6 +229,16 @@ class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
         self.config = config
+        self.transcript_store = TranscriptStore(
+            default_transcript_storage_dir(config.transcript_storage_dir)
+        )
+        self.transcript_persistence = TranscriptPersistence(self.transcript_store)
+        self._current_transcript_session: TranscriptSession | None = None
+        self._saved_transcript_sessions: dict[str, TranscriptSession] = {}
+        self._transcript_history_loaded = False
+        self._transcript_recovery_checked = False
+        self._history_view_mode = "current"
+        self._realtime_stop_intent = ""
         self.subtitle_state = SubtitleState()
         self.chinese_caption_composer = ChineseCaptionComposer(max_visible_lines=64)
         self.translation_planner = IncrementalTranslationPlanner()
@@ -284,6 +308,9 @@ class MainWindow(QMainWindow):
         self.correction_hint_label: QLabel | None = None
         self.history_list: QListWidget | None = None
         self.history_count_label: QLabel | None = None
+        self.history_current_button: QPushButton | None = None
+        self.history_saved_button: QPushButton | None = None
+        self.history_session_combo: QComboBox | None = None
         self._history_items: dict[str, QListWidgetItem] = {}
         self.recognition_mode_group: QButtonGroup | None = None
         self.recognition_mode_buttons: list[QPushButton] = []
@@ -340,7 +367,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("实时转译")
         title.setObjectName("WindowTitle")
-        subtitle = QLabel("系统输出  ·  English → 简体中文")
+        subtitle = QLabel("系统声音  ·  英语 → 简体中文")
         subtitle.setObjectName("WindowSubtitle")
 
         title_block.addWidget(title)
@@ -472,8 +499,49 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("中文优先展示，英文作为上下文参考")
         subtitle.setObjectName("HistorySubtitle")
 
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_group = QButtonGroup(panel)
+        mode_group.setExclusive(True)
+
+        current_button = QPushButton("当前")
+        current_button.setObjectName("SegmentButton")
+        current_button.setCheckable(True)
+        current_button.setChecked(True)
+        current_button.setFixedHeight(32)
+        current_button.clicked.connect(
+            lambda _checked=False: self._set_history_view_mode("current")
+        )
+        self.history_current_button = current_button
+
+        saved_button = QPushButton("历史")
+        saved_button.setObjectName("SegmentButton")
+        saved_button.setCheckable(True)
+        saved_button.setFixedHeight(32)
+        saved_button.clicked.connect(
+            lambda _checked=False: self._set_history_view_mode("saved")
+        )
+        self.history_saved_button = saved_button
+
+        mode_group.addButton(current_button)
+        mode_group.addButton(saved_button)
+        mode_row.addWidget(current_button)
+        mode_row.addWidget(saved_button)
+        mode_row.addStretch(1)
+
+        session_combo = QComboBox()
+        session_combo.setObjectName("Input")
+        session_combo.setMinimumWidth(250)
+        session_combo.setVisible(False)
+        session_combo.currentIndexChanged.connect(
+            self._handle_saved_session_selected
+        )
+        self.history_session_combo = session_combo
+
         layout.addLayout(heading)
         layout.addWidget(subtitle)
+        layout.addLayout(mode_row)
+        layout.addWidget(session_combo)
         layout.addWidget(self._build_history_list(), stretch=1)
         return panel
 
@@ -509,7 +577,7 @@ class MainWindow(QMainWindow):
         return section
 
     def _build_mode_section(self) -> QWidget:
-        section = self._section("识别模式")
+        section = self._section("转译模式")
         layout = section.layout()
 
         button_row = QHBoxLayout()
@@ -592,11 +660,6 @@ class MainWindow(QMainWindow):
         grid.addWidget(size_label, 3, 0)
         grid.addWidget(size, 3, 1)
         layout.addLayout(grid)
-
-        resize_hint = QLabel("字幕窗可拖动移动，也可从边缘或右下角自由缩放")
-        resize_hint.setObjectName("FieldHint")
-        resize_hint.setWordWrap(True)
-        layout.addWidget(resize_hint)
 
         return section
 
@@ -722,21 +785,27 @@ class MainWindow(QMainWindow):
             return
 
         self.demo_timer.stop()
-        self._reset_realtime_state()
+        profile = self._selected_recognition_profile()
+        if self._is_current_transcript_paused():
+            self._resume_transcript_session()
+            self._set_history_view_mode("current")
+        else:
+            self._reset_realtime_state()
+            self._begin_transcript_session(profile.mode)
         self._realtime_generation += 1
         generation = self._realtime_generation
         self._accept_realtime_generation = generation
+        self._realtime_stop_intent = ""
         self._show_overlay()
         self._set_transport_running(True)
-        self._set_status("启动中")
+        self._set_status("准备中")
 
-        profile = self._selected_recognition_profile()
         self._active_recognition_profile = profile
         self._dropped_chunks_warned = False
         self._set_dropped_chunks_display(0)
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText(
-                f"已启用{profile.label}模式，正在监听系统音频。"
+                f"{profile.label}模式已开启，正在聆听播放内容。"
             )
 
         thread = QThread(self)
@@ -747,6 +816,7 @@ class MainWindow(QMainWindow):
             queue_size=profile.queue_size,
             dropped_chunks_warn_threshold=profile.dropped_chunks_warn_threshold,
             max_stream_duration_seconds=profile.max_stream_duration_seconds,
+            segment_id_prefix=f"asr_{generation:04d}",
         )
         worker.moveToThread(thread)
 
@@ -797,21 +867,27 @@ class MainWindow(QMainWindow):
 
     def _pause_subtitle_stream(self) -> None:
         if self._is_realtime_running():
+            self._realtime_stop_intent = "pause"
             self._stop_realtime_worker()
+            self._pause_transcript_session()
             self._set_status("暂停")
             if self.correction_hint_label is not None:
-                self.correction_hint_label.setText("已暂停实时识别，点击“开始”可重新监听系统音频。")
+                self.correction_hint_label.setText(
+                    "转译已暂停，点击“开始转译”继续聆听。"
+                )
             return
         self._pause_demo_stream()
 
     def _stop_subtitle_stream(self) -> None:
-        if self._is_realtime_running():
-            self._stop_realtime_worker()
-            self._hide_overlay()
-            self._reset_realtime_state()
-            self._set_status("待机")
+        if self.config.asr_provider.strip().lower() == "mock":
+            self._stop_demo_stream()
             return
-        self._stop_demo_stream()
+        if self._is_realtime_running():
+            self._realtime_stop_intent = "stop"
+            self._stop_realtime_worker()
+        self._finalize_transcript_session(TranscriptSessionStatus.STOPPED)
+        self._hide_overlay()
+        self._set_status("待机")
 
     def _is_realtime_running(self) -> bool:
         return self.realtime_thread is not None and self.realtime_thread.isRunning()
@@ -878,6 +954,12 @@ class MainWindow(QMainWindow):
         )
         event = self._with_preserved_translation(event)
         segment = self.subtitle_state.apply(event)
+        if _is_realtime_asr_segment(segment):
+            self.chinese_caption_composer.observe_segment(segment.segment_id)
+        self._record_transcript_segment(
+            segment,
+            urgent=event.type != SubtitleEventType.PARTIAL,
+        )
         if has_incoming_translation and _is_realtime_asr_segment(segment):
             if event.type == SubtitleEventType.FINAL:
                 self.chinese_caption_composer.accept_final(
@@ -1044,6 +1126,7 @@ class MainWindow(QMainWindow):
             )
 
         segment = self.subtitle_state.apply(event)
+        self._record_transcript_segment(segment, urgent=update.is_final)
         display_text = self._compose_realtime_display_text(event, segment)
         self._render_translation_update(event, segment, display_text=display_text)
 
@@ -1068,6 +1151,12 @@ class MainWindow(QMainWindow):
         )
 
     def _latest_realtime_segment(self) -> SubtitleSegment | None:
+        latest_segment_id = self.chinese_caption_composer.latest_segment_id
+        if latest_segment_id:
+            latest = self.subtitle_state.get(latest_segment_id)
+            if latest is not None:
+                return latest
+
         fallback: SubtitleSegment | None = None
         for segment in reversed(self.subtitle_state.segments()):
             if _is_realtime_asr_segment(segment):
@@ -1078,6 +1167,11 @@ class MainWindow(QMainWindow):
         return fallback
 
     def _handle_realtime_error(self, message: str) -> None:
+        self._realtime_stop_intent = "error"
+        self._finalize_transcript_session(
+            TranscriptSessionStatus.FAILED,
+            error_message=message,
+        )
         self._set_status("异常")
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText(message)
@@ -1087,6 +1181,16 @@ class MainWindow(QMainWindow):
             self.correction_hint_label.setText(message)
 
     def _handle_realtime_finished(self) -> None:
+        if (
+            self._current_transcript_session is not None
+            and self._current_transcript_session.status
+            == TranscriptSessionStatus.RUNNING
+            and not self._realtime_stop_intent
+        ):
+            self._finalize_transcript_session(
+                TranscriptSessionStatus.INTERRUPTED,
+                error_message="字幕服务意外中断",
+            )
         self.realtime_thread = None
         self.realtime_worker = None
         self._active_recognition_profile = None
@@ -1134,8 +1238,8 @@ class MainWindow(QMainWindow):
 
         self._dropped_chunks_warned = True
         self.correction_hint_label.setText(
-            f"已丢弃 {dropped_chunks} 个旧音频块，当前识别处理可能跟不上实时音频。"
-            "可尝试切换到高准确模式，或关闭占用 CPU 的程序。"
+            "音频处理出现积压，字幕可能会有短暂延迟。"
+            "可尝试切换到高准确模式，或关闭占用较高的程序。"
         )
 
     def _set_transport_running(self, running: bool) -> None:
@@ -1147,8 +1251,15 @@ class MainWindow(QMainWindow):
             self.stop_button.setEnabled(True)
 
     def _start_demo_stream(self) -> None:
-        if self.demo_step_index >= len(self.demo_script):
+        if self._is_current_transcript_paused():
+            self._resume_transcript_session()
+            self._set_history_view_mode("current")
+        elif (
+            self._current_transcript_session is None
+            or not self._current_transcript_session.is_open
+        ):
             self._reset_demo_state()
+            self._begin_transcript_session("demo")
         self._show_overlay()
         self._set_status("演示中")
         self._advance_demo_stream()
@@ -1156,16 +1267,18 @@ class MainWindow(QMainWindow):
     def _pause_demo_stream(self) -> None:
         if self.demo_timer.isActive():
             self.demo_timer.stop()
+            self._pause_transcript_session()
             self._set_status("暂停")
             return
         if 0 < self.demo_step_index < len(self.demo_script):
+            self._resume_transcript_session()
             self._set_status("演示中")
             self._schedule_next_demo_step()
 
     def _stop_demo_stream(self) -> None:
         self.demo_timer.stop()
         self._hide_overlay()
-        self._reset_demo_state()
+        self._finalize_transcript_session(TranscriptSessionStatus.STOPPED)
         self._set_status("待机")
 
     def _advance_demo_stream(self) -> None:
@@ -1175,6 +1288,10 @@ class MainWindow(QMainWindow):
 
         step = self.demo_script[self.demo_step_index]
         segment = self.subtitle_state.apply(step.event)
+        self._record_transcript_segment(
+            segment,
+            urgent=step.event.type != SubtitleEventType.PARTIAL,
+        )
         self._render_subtitle_event(step.event, segment)
         self.demo_step_index += 1
 
@@ -1182,6 +1299,7 @@ class MainWindow(QMainWindow):
             self._schedule_next_demo_step()
         else:
             self._set_status("完成")
+            self._finalize_transcript_session(TranscriptSessionStatus.STOPPED)
 
     def _schedule_next_demo_step(self) -> None:
         step = self.demo_script[self.demo_step_index]
@@ -1204,6 +1322,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         source_display_text = segment.source_text if display_text is None else display_text
         translation_frame_is_final = False
+        overlay_stable_line_count: int | None = None
         if _is_realtime_asr_segment(segment):
             source_display_text = self._build_realtime_source_display(
                 segment,
@@ -1212,20 +1331,23 @@ class MainWindow(QMainWindow):
             translation_frame = self.chinese_caption_composer.current_frame()
             translation_display_text = translation_frame.text
             translation_frame_is_final = translation_frame.is_final
+            stable_translation = translation_frame.stable_text
+            active_translation = translation_frame.active_text
+            overlay_stable_line_count = len(translation_frame.stable_lines)
         else:
             translation_display_text = self._translation_display_for_segment(segment)
+            translation_lines = [
+                line.strip()
+                for line in translation_display_text.splitlines()
+                if line.strip()
+            ][-4:]
+            stable_translation = "\n".join(translation_lines[:-1])
+            active_translation = translation_lines[-1] if translation_lines else ""
         if self.source_caption_label is not None:
             self.source_caption_label.set_caption_text(
                 source_display_text,
                 animate=False,
             )
-        translation_lines = [
-            line.strip()
-            for line in translation_display_text.splitlines()
-            if line.strip()
-        ][-4:]
-        stable_translation = "\n".join(translation_lines[:-1])
-        active_translation = translation_lines[-1] if translation_lines else ""
         if self.translation_stable_caption_label is not None:
             self.translation_stable_caption_label.set_caption_text(
                 stable_translation,
@@ -1256,6 +1378,7 @@ class MainWindow(QMainWindow):
             source_text=source_display_text,
             zh_text=translation_display_text,
             state=overlay_state,
+            stable_line_count=overlay_stable_line_count,
         )
         self._render_history_segment(segment)
 
@@ -1271,6 +1394,16 @@ class MainWindow(QMainWindow):
         return " ".join(current_display_text.split())
 
     def _render_history_segment(self, segment: SubtitleSegment) -> None:
+        if self._history_view_mode != "current":
+            return
+        self._upsert_history_segment(segment, scroll_to_bottom=True)
+
+    def _upsert_history_segment(
+        self,
+        segment: SubtitleSegment,
+        *,
+        scroll_to_bottom: bool,
+    ) -> None:
         if self.history_list is None:
             return
 
@@ -1299,26 +1432,20 @@ class MainWindow(QMainWindow):
         entry.set_content(source_text, translation_text)
         self._resize_history_item(item, entry)
 
-        active_ids = {current.segment_id for current in self.subtitle_state.segments()}
-        for stale_id in set(self._history_items) - active_ids:
-            stale_item = self._history_items.pop(stale_id)
-            row = self.history_list.row(stale_item)
-            if row >= 0:
-                self.history_list.takeItem(row)
-
         self._update_history_count()
-        self.history_list.scrollToBottom()
+        if scroll_to_bottom:
+            self.history_list.scrollToBottom()
 
     def _build_event_hint(self, event: SubtitleEvent, segment: SubtitleSegment) -> str:
         if segment.status == SubtitleSegmentStatus.UPDATED:
-            return "字幕已根据上下文更新"
+            return "已结合上下文优化译文"
         if segment.status == SubtitleSegmentStatus.FINAL:
             if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
-                return "英文已确认，正在生成中文字幕"
-            return "当前字幕已完成"
+                return "原文已确认，正在完善译文"
+            return "本句已完成"
         if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
-            return "正在识别并生成中文字幕"
-        return "中文字幕正在同步更新"
+            return "正在聆听并生成字幕"
+        return "译文正在同步更新"
 
     def _format_history_item(self, segment: SubtitleSegment) -> str:
         source_text, translation_text = self._history_text_parts(segment)
@@ -1364,23 +1491,258 @@ class MainWindow(QMainWindow):
         if self.history_count_label is not None:
             self.history_count_label.setText(f"{len(self._history_items)} 条")
 
-    def _reset_history_placeholder(self) -> None:
+    def _set_history_view_mode(self, mode: str) -> None:
+        if mode not in {"current", "saved"}:
+            return
+        self._history_view_mode = mode
+        if self.history_current_button is not None:
+            self.history_current_button.setChecked(mode == "current")
+        if self.history_saved_button is not None:
+            self.history_saved_button.setChecked(mode == "saved")
+        if self.history_session_combo is not None:
+            self.history_session_combo.setVisible(mode == "saved")
+
+        if mode == "current":
+            self._render_transcript_session(
+                self._current_transcript_session,
+                empty_title="还没有转译内容",
+                empty_subtitle="开始转译后，本次内容会实时保存在这里",
+            )
+            return
+
+        self._load_transcript_history()
+        self._refresh_saved_session_selector()
+        self._handle_saved_session_selected(
+            self.history_session_combo.currentIndex()
+            if self.history_session_combo is not None
+            else -1
+        )
+
+    def _load_transcript_history(self, *, force: bool = False) -> None:
+        if self._transcript_history_loaded and not force:
+            return
+        self._recover_interrupted_transcripts()
+        sessions = self.transcript_store.list_sessions()
+        current = self._current_transcript_session
+        if current is not None and current.is_open:
+            sessions = [
+                session
+                for session in sessions
+                if session.session_id != current.session_id
+            ]
+        self._saved_transcript_sessions = {
+            session.session_id: session for session in sessions
+        }
+        self._transcript_history_loaded = True
+
+    def _recover_interrupted_transcripts(self) -> None:
+        if self._transcript_recovery_checked:
+            return
+        self.transcript_store.recover_interrupted_sessions()
+        self._transcript_recovery_checked = True
+
+    def _refresh_saved_session_selector(self) -> None:
+        combo = self.history_session_combo
+        if combo is None:
+            return
+        selected_session_id = combo.currentData()
+        sessions = list(self._saved_transcript_sessions.values())
+        combo.blockSignals(True)
+        combo.clear()
+        for session in sessions:
+            combo.addItem(self._format_transcript_session_label(session), session.session_id)
+        if selected_session_id:
+            for index in range(combo.count()):
+                if combo.itemData(index) == selected_session_id:
+                    combo.setCurrentIndex(index)
+                    break
+        combo.blockSignals(False)
+
+    def _handle_saved_session_selected(self, index: int) -> None:
+        if self._history_view_mode != "saved":
+            return
+        combo = self.history_session_combo
+        if combo is None or index < 0:
+            self._render_transcript_session(
+                None,
+                empty_title="还没有历史记录",
+                empty_subtitle="完成一次转译后，可在这里回看完整的中英文记录",
+            )
+            return
+        session_id = combo.itemData(index)
+        session = self._saved_transcript_sessions.get(str(session_id))
+        if session is None:
+            session = self.transcript_store.load_session(str(session_id))
+        self._render_transcript_session(
+            session,
+            empty_title="本次记录没有内容",
+            empty_subtitle="这次转译中没有可保存的语音内容",
+        )
+
+    def _render_transcript_session(
+        self,
+        session: TranscriptSession | None,
+        *,
+        empty_title: str,
+        empty_subtitle: str,
+    ) -> None:
+        if self.history_list is None:
+            return
+        self.history_list.setUpdatesEnabled(False)
+        self.history_list.clear()
+        self._history_items.clear()
+        if session is None or not session.segments:
+            self._install_history_placeholder(
+                title_text=empty_title,
+                subtitle_text=empty_subtitle,
+            )
+        else:
+            for segment in session.segments:
+                self._upsert_history_segment(
+                    segment.to_subtitle_segment(),
+                    scroll_to_bottom=False,
+                )
+        self.history_list.setUpdatesEnabled(True)
+        self._update_history_count()
+        self._resize_history_items()
+        self.history_list.scrollToTop()
+
+    def _format_transcript_session_label(self, session: TranscriptSession) -> str:
+        started_at = datetime.fromisoformat(session.started_at).astimezone()
+        status_text = {
+            TranscriptSessionStatus.RUNNING: "进行中",
+            TranscriptSessionStatus.PAUSED: "已暂停",
+            TranscriptSessionStatus.STOPPED: "已完成",
+            TranscriptSessionStatus.INTERRUPTED: "意外中断",
+            TranscriptSessionStatus.FAILED: "异常结束",
+        }[session.status]
+        duration = _format_duration(session.duration_seconds)
+        return (
+            f"{started_at:%m-%d %H:%M} · {len(session.segments)} 条"
+            f" · {duration} · {status_text}"
+        )
+
+    def _reset_history_placeholder(
+        self,
+        *,
+        title_text: str = "还没有转译内容",
+        subtitle_text: str = "开始转译后，中英文内容会按时间顺序保存在这里",
+    ) -> None:
         if self.history_list is None:
             return
         self.history_list.clear()
         self._history_items.clear()
-        self._install_history_placeholder()
+        self._install_history_placeholder(
+            title_text=title_text,
+            subtitle_text=subtitle_text,
+        )
         self._update_history_count()
 
-    def _install_history_placeholder(self) -> None:
+    def _install_history_placeholder(
+        self,
+        *,
+        title_text: str = "还没有转译内容",
+        subtitle_text: str = "开始转译后，中英文内容会按时间顺序保存在这里",
+    ) -> None:
         if self.history_list is None:
             return
-        item = QListWidgetItem("开始转译后，双语内容会连续记录在这里")
+        item = QListWidgetItem(subtitle_text)
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         item.setForeground(QBrush(QColor(0, 0, 0, 0)))
         self.history_list.addItem(item)
-        self.history_list.setItemWidget(item, _HistoryEmptyWidget())
+        self.history_list.setItemWidget(
+            item,
+            _HistoryEmptyWidget(title_text, subtitle_text),
+        )
         QTimer.singleShot(0, self._resize_history_items)
+
+    def _begin_transcript_session(self, recognition_mode: str) -> None:
+        self._recover_interrupted_transcripts()
+        if (
+            self._current_transcript_session is not None
+            and self._current_transcript_session.is_open
+        ):
+            self._finalize_transcript_session(
+                TranscriptSessionStatus.INTERRUPTED,
+                error_message="新的监听会话已开始",
+            )
+        self._current_transcript_session = TranscriptSession.create(
+            asr_provider=self.config.asr_provider,
+            translation_provider=self.config.active_translation_provider,
+            source_language=self.config.source_language,
+            target_language=self.config.target_language,
+            recognition_mode=recognition_mode,
+        )
+        self.transcript_persistence.schedule(
+            self._current_transcript_session,
+            urgent=True,
+        )
+        self._transcript_history_loaded = False
+        self._set_history_view_mode("current")
+
+    def _record_transcript_segment(
+        self,
+        segment: SubtitleSegment,
+        *,
+        urgent: bool,
+    ) -> None:
+        session = self._current_transcript_session
+        if session is None or not session.is_open:
+            return
+        session.upsert_segment(segment)
+        self.transcript_persistence.schedule(session, urgent=urgent)
+
+    def _pause_transcript_session(self) -> None:
+        session = self._current_transcript_session
+        if session is None:
+            return
+        session.pause()
+        self.transcript_persistence.schedule(session, urgent=True)
+
+    def _resume_transcript_session(self) -> None:
+        session = self._current_transcript_session
+        if session is None:
+            return
+        session.resume()
+        self.transcript_persistence.schedule(session, urgent=True)
+
+    def _is_current_transcript_paused(self) -> bool:
+        return (
+            self._current_transcript_session is not None
+            and self._current_transcript_session.status
+            == TranscriptSessionStatus.PAUSED
+        )
+
+    def _finalize_transcript_session(
+        self,
+        status: TranscriptSessionStatus,
+        *,
+        error_message: str = "",
+    ) -> None:
+        session = self._current_transcript_session
+        if session is None or not session.is_open:
+            return
+        session.finish(status, error_message=error_message)
+        self.transcript_persistence.schedule(session, urgent=True)
+        flushed = self.transcript_persistence.flush()
+        persistence_error = self.transcript_persistence.last_error
+        if (
+            (not flushed or persistence_error is not None)
+            and self.correction_hint_label is not None
+        ):
+            detail = str(persistence_error) if persistence_error is not None else "写入超时"
+            self.correction_hint_label.setText(f"转译记录保存失败：{detail}")
+        self._transcript_history_loaded = False
+        if self._history_view_mode == "saved":
+            self._load_transcript_history(force=True)
+            self._refresh_saved_session_selector()
+            combo = self.history_session_combo
+            if combo is not None:
+                for index in range(combo.count()):
+                    if combo.itemData(index) == session.session_id:
+                        combo.setCurrentIndex(index)
+                        break
+                self._handle_saved_session_selected(combo.currentIndex())
 
     def _reset_realtime_state(self) -> None:
         self.realtime_render_timer.stop()
@@ -1396,7 +1758,7 @@ class MainWindow(QMainWindow):
         self._set_dropped_chunks_display(0)
         if self.source_caption_label is not None:
             self.source_caption_label.set_caption_text(
-                "等待系统音频中的语音。",
+                "正在聆听播放内容…",
                 animate=False,
             )
         if self.translation_stable_caption_label is not None:
@@ -1404,15 +1766,15 @@ class MainWindow(QMainWindow):
             self.translation_stable_caption_label.hide()
         if self.translation_caption_label is not None:
             self.translation_caption_label.set_caption_text(
-                "实时 ASR 已准备，识别结果会先以原文字幕展示。",
+                "翻译会随着声音实时呈现",
                 animate=False,
             )
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText("准备就绪")
         self._reset_history_placeholder()
         self.overlay.set_caption(
-            source_text="等待系统音频中的语音。",
-            zh_text="实时 ASR 已准备。",
+            source_text="",
+            zh_text="正在聆听，字幕即将出现",
             state=SubtitleSegmentStatus.PARTIAL.value,
         )
 
@@ -1427,7 +1789,7 @@ class MainWindow(QMainWindow):
         self.demo_step_index = 0
         if self.source_caption_label is not None:
             self.source_caption_label.set_caption_text(
-                "等待模拟字幕流启动。",
+                "演示内容即将开始",
                 animate=False,
             )
         if self.translation_stable_caption_label is not None:
@@ -1435,11 +1797,11 @@ class MainWindow(QMainWindow):
             self.translation_stable_caption_label.hide()
         if self.translation_caption_label is not None:
             self.translation_caption_label.set_caption_text(
-                "点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。",
+                "字幕会随着内容自然呈现",
                 animate=False,
             )
         if self.correction_hint_label is not None:
-            self.correction_hint_label.setText("正在运行内置字幕演示")
+            self.correction_hint_label.setText("字幕演示已就绪")
         self._reset_history_placeholder()
         self.overlay.set_sample_caption()
 
@@ -1454,12 +1816,15 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: ANN001
         self.demo_timer.stop()
         self.realtime_render_timer.stop()
+        self._realtime_stop_intent = "close"
         self._accept_realtime_generation = None
         if self.realtime_worker is not None:
             self.realtime_worker.stop()
         if self.realtime_thread is not None and self.realtime_thread.isRunning():
             self.realtime_thread.quit()
             self.realtime_thread.wait(2000)
+        self._finalize_transcript_session(TranscriptSessionStatus.INTERRUPTED)
+        self.transcript_persistence.close()
         self._stop_translation_manager()
         self.overlay.close()
         super().closeEvent(event)
@@ -1535,6 +1900,15 @@ def _is_source_prefix(prefix_text: str, full_text: str) -> bool:
 
 def _normalized_words(text: str) -> list[str]:
     return text.casefold().split()
+
+
+def _format_duration(duration_seconds: float) -> str:
+    total_seconds = max(0, int(duration_seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 def _wrapped_text_height(metrics: QFontMetrics, text: str, width: int) -> int:

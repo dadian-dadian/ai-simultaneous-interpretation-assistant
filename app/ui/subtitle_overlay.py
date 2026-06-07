@@ -14,6 +14,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QCursor, QFont
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QLabel,
     QLayout,
     QPushButton,
@@ -33,9 +34,9 @@ class SubtitleOverlayWindow(QWidget):
     size_mode_changed = Signal(str)
 
     SIZE_PRESETS = {
-        "compact": QSize(680, 190),
-        "standard": QSize(860, 260),
-        "wide": QSize(1080, 260),
+        "compact": QSize(700, 210),
+        "standard": QSize(880, 280),
+        "wide": QSize(1100, 280),
     }
     _RESIZE_MARGIN = 8
 
@@ -58,7 +59,7 @@ class SubtitleOverlayWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
-        self.setMinimumSize(480, 140)
+        self.setMinimumSize(500, 160)
         self.resize(self.SIZE_PRESETS["compact"])
 
         self._build_ui()
@@ -76,8 +77,15 @@ class SubtitleOverlayWindow(QWidget):
         shell.addWidget(self.container)
 
         layout = QVBoxLayout(self.container)
-        layout.setContentsMargins(18, 12, 12, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(16, 14, 12, 11)
+        layout.setSpacing(8)
+
+        self.close_button = QPushButton("×", self.container)
+        self.close_button.setObjectName("OverlayCloseButton")
+        self.close_button.setToolTip("关闭字幕窗")
+        self.close_button.setFixedSize(28, 28)
+        self.close_button.clicked.connect(self.hide)
+        self.close_button.raise_()
 
         self.translation_scroll = QScrollArea()
         self.translation_scroll.setObjectName("OverlayTranslationScroll")
@@ -93,6 +101,7 @@ class SubtitleOverlayWindow(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
+        self.translation_scroll.setViewportMargins(0, 0, 34, 0)
         self._make_scroll_area_transparent(self.translation_scroll)
         self.translation_scroll.viewport().installEventFilter(self)
 
@@ -104,7 +113,7 @@ class SubtitleOverlayWindow(QWidget):
         )
         self.translation_layout = QVBoxLayout(self.translation_content)
         self.translation_layout.setContentsMargins(0, 0, 0, 0)
-        self.translation_layout.setSpacing(2)
+        self.translation_layout.setSpacing(8)
         self.translation_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.translation_layout.setSizeConstraint(
             QLayout.SizeConstraint.SetMinimumSize
@@ -114,6 +123,18 @@ class SubtitleOverlayWindow(QWidget):
         self.divider = QFrame()
         self.divider.setObjectName("OverlayDivider")
         self.divider.setFixedHeight(1)
+
+        self.source_bar = QFrame()
+        self.source_bar.setObjectName("OverlaySourceBar")
+        self.source_bar.setFixedHeight(28)
+        source_layout = QHBoxLayout(self.source_bar)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.setSpacing(8)
+
+        self.source_language = QLabel("EN")
+        self.source_language.setObjectName("OverlaySourceLanguage")
+        self.source_language.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.source_language.setFixedSize(26, 20)
 
         self.source_scroll = QScrollArea()
         self.source_scroll.setObjectName("OverlaySourceScroll")
@@ -125,7 +146,7 @@ class SubtitleOverlayWindow(QWidget):
         self.source_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.source_scroll.setFixedHeight(22)
+        self.source_scroll.setFixedHeight(28)
         self._make_scroll_area_transparent(self.source_scroll)
         self.source_scroll.viewport().installEventFilter(self)
 
@@ -141,9 +162,12 @@ class SubtitleOverlayWindow(QWidget):
         )
         self.source_scroll.setWidget(self.source_label)
 
+        source_layout.addWidget(self.source_language)
+        source_layout.addWidget(self.source_scroll, stretch=1)
+
         layout.addWidget(self.translation_scroll, stretch=1)
         layout.addWidget(self.divider)
-        layout.addWidget(self.source_scroll)
+        layout.addWidget(self.source_bar)
 
         self.resize_grip = QSizeGrip(self.container)
         self.resize_grip.setObjectName("OverlayResizeGrip")
@@ -179,41 +203,26 @@ class SubtitleOverlayWindow(QWidget):
         self._scroll_snap_timer.setInterval(20)
         self._scroll_snap_timer.timeout.connect(self._snap_scrollbars_to_end)
 
-        # Compatibility controls remain hidden; the overlay itself is subtitle-only.
-        self.header = QFrame(self)
-        self.header.hide()
-        self.state_badge = QLabel("实时", self.header)
-        self.state_badge.setObjectName("OverlayStateBadge")
-        self.drag_hint = QLabel("", self.header)
-        self.close_button = QPushButton("×", self.header)
-        self.close_button.setObjectName("OverlayCloseButton")
-        self.close_button.clicked.connect(self.hide)
-
         self.translation_label = self._ensure_sentence_label(0)
         self.translation_stable_label = self.translation_label
         self.completed_labels: list[SmoothCaptionLabel] = []
+        self._position_overlay_controls()
 
     def set_sample_caption(self) -> None:
         self.set_caption(
-            source_text="Today we are going to discuss real-time translation.",
-            zh_text=(
-                "系统正在监听音频。"
-                "英文识别结果会持续更新。"
-                "已完成的中文字幕保持稳定。"
-                "当前句子自然地继续出现"
-            ),
+            source_text="",
+            zh_text="字幕窗口已就绪",
             state="partial",
         )
 
-    def set_caption(self, source_text: str, zh_text: str, state: str = "partial") -> None:
-        self.state_badge.setText(
-            {
-                "partial": "实时",
-                "final": "确认",
-                "updated": "已修正",
-                "finalizing": "确认中",
-            }.get(state, "实时")
-        )
+    def set_caption(
+        self,
+        source_text: str,
+        zh_text: str,
+        state: str = "partial",
+        *,
+        stable_line_count: int | None = None,
+    ) -> None:
         self._has_distinct_translation = (
             bool(zh_text.strip()) and source_text.strip() != zh_text.strip()
         )
@@ -223,27 +232,34 @@ class SubtitleOverlayWindow(QWidget):
         if not self._has_distinct_translation:
             sentences = []
         final_state = state in {"final", "updated"}
-        self._set_translation_sentences(sentences, final_state=final_state)
+        self._set_translation_sentences(
+            sentences,
+            final_state=final_state,
+            stable_line_count=stable_line_count,
+        )
         self._apply_display_mode()
         self._schedule_layout_refresh()
-
-        if self.state_badge.property("captionState") != state:
-            self.state_badge.setProperty("captionState", state)
 
     def _set_translation_sentences(
         self,
         sentences: list[tuple[str, bool]],
         *,
         final_state: bool,
+        stable_line_count: int | None,
     ) -> None:
         for index, (text, punctuation_complete) in enumerate(sentences):
             label = self._ensure_sentence_label(index)
-            is_completed = final_state or punctuation_complete or index < len(sentences) - 1
+            if stable_line_count is None:
+                is_completed = (
+                    final_state
+                    or punctuation_complete
+                    or index < len(sentences) - 1
+                )
+            else:
+                is_completed = index < stable_line_count
             if label.property("captionCompleted") != is_completed:
                 label.setProperty("captionCompleted", is_completed)
-                label.setStyleSheet(
-                    "color: #95a39f;" if is_completed else "color: #f1f5f3;"
-                )
+                _refresh_widget_style(label)
             self._apply_font(label)
             if label.set_caption_text(text, animate=not is_completed):
                 self._label_height_cache.pop(id(label), None)
@@ -293,7 +309,7 @@ class SubtitleOverlayWindow(QWidget):
             self._apply_font(label)
 
         source_font = QFont(self.source_label.font())
-        source_font.setPointSize(max(8, round(self._font_size * 0.5)))
+        source_font.setPointSize(max(10, round(self._font_size * 0.7)))
         source_font.setWeight(QFont.Weight.Normal)
         self.source_label.setFont(source_font)
         self._schedule_layout_refresh()
@@ -324,7 +340,7 @@ class SubtitleOverlayWindow(QWidget):
             for label in self._sentence_labels:
                 label.hide()
             self.divider.hide()
-            self.source_scroll.show()
+            self.source_bar.show()
             self.source_label.show()
             return
 
@@ -334,12 +350,9 @@ class SubtitleOverlayWindow(QWidget):
         self.translation_label.show()
         source_visible = (
             self._display_mode == "bilingual"
-            and (
-                self._has_distinct_translation
-                or bool(self.source_label.text().strip())
-            )
+            and bool(self.source_label.text().strip())
         )
-        self.source_scroll.setVisible(source_visible)
+        self.source_bar.setVisible(source_visible)
         self.source_label.setVisible(source_visible)
         self.divider.setVisible(source_visible)
 
@@ -502,10 +515,7 @@ class SubtitleOverlayWindow(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: ANN001
         super().resizeEvent(event)
         self._label_height_cache.clear()
-        self.resize_grip.move(
-            self.container.width() - self.resize_grip.width() - 5,
-            self.container.height() - self.resize_grip.height() - 5,
-        )
+        self._position_overlay_controls()
         self._schedule_layout_refresh()
         current_size = event.size()
         mode = next(
@@ -517,6 +527,17 @@ class SubtitleOverlayWindow(QWidget):
             "custom",
         )
         self.size_mode_changed.emit(mode)
+
+    def _position_overlay_controls(self) -> None:
+        self.resize_grip.move(
+            self.container.width() - self.resize_grip.width() - 5,
+            self.container.height() - self.resize_grip.height() - 5,
+        )
+        self.close_button.move(
+            self.container.width() - self.close_button.width() - 8,
+            8,
+        )
+        self.close_button.raise_()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: ANN001
         if (
@@ -583,3 +604,10 @@ def _wrapped_label_height(label: QLabel, width: int) -> int:
         label.text(),
     )
     return max(metrics.height(), bounds.height() + 2)
+
+
+def _refresh_widget_style(widget: QWidget) -> None:
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.update()

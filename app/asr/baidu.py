@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -99,7 +100,7 @@ class BaiduRealtimeAsrClient:
                 f"{self.ws_url}?sn={sn}",
                 timeout=self.timeout_seconds,
             )
-        except websocket.WebSocketException as exc:
+        except (websocket.WebSocketException, OSError) as exc:
             raise AsrError(f"无法连接百度实时 ASR WebSocket：{exc}") from exc
 
         try:
@@ -122,8 +123,9 @@ class BaiduRealtimeAsrClient:
                     ensure_ascii=False,
                 )
             )
-        except websocket.WebSocketException as exc:
-            connection.close()
+        except (websocket.WebSocketException, OSError) as exc:
+            with suppress(websocket.WebSocketException, OSError):
+                connection.close()
             raise AsrError(f"百度实时 ASR WebSocket START 发送失败：{exc}") from exc
 
         return BaiduRealtimeAsrSession(
@@ -185,7 +187,7 @@ class BaiduRealtimeAsrSession:
             try:
                 with self._send_lock:
                     self.connection.send_binary(frame)
-            except websocket.WebSocketException as exc:
+            except (websocket.WebSocketException, OSError) as exc:
                 raise AsrError(f"百度实时 ASR WebSocket 音频发送失败：{exc}") from exc
             events.extend(self._drain_received_events())
         return events
@@ -201,7 +203,7 @@ class BaiduRealtimeAsrSession:
                     self._pending_pcm = b""
                 self.connection.send(json.dumps({"type": "FINISH"}))
             self._wait_for_finish_events()
-        except websocket.WebSocketException as exc:
+        except (websocket.WebSocketException, OSError) as exc:
             raise AsrError(f"百度实时 ASR WebSocket 结束失败：{exc}") from exc
         finally:
             self.close()
@@ -211,7 +213,9 @@ class BaiduRealtimeAsrSession:
         if self._closed:
             return
         self._closed = True
-        self.connection.close()
+        with self._send_lock:
+            with suppress(websocket.WebSocketException, OSError):
+                self.connection.close()
         self._receiver_done.wait(timeout=0.5)
 
     def _build_result(self, duration_seconds: float) -> AsrResult:
@@ -271,6 +275,11 @@ class BaiduRealtimeAsrSession:
             self._receive_error = AsrError(
                 f"百度实时 ASR WebSocket 接收失败：{exc}"
             )
+        except OSError as exc:
+            if not self._closed:
+                self._receive_error = AsrError(
+                    f"百度实时 ASR WebSocket 接收失败：{exc}"
+                )
         finally:
             self._receiver_done.set()
 

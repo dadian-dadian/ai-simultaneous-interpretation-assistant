@@ -4,7 +4,7 @@ from app.asr.types import AsrResult, AsrTextSegment
 from app.audio.capture import AudioChunk
 
 DEFAULT_MOCK_TRANSCRIPT = (
-    "This is a mock transcription for validating the ASR pipeline without an API key."
+    "Welcome. The live transcript will appear here as the conversation continues."
 )
 
 
