@@ -78,6 +78,24 @@ class SileroVadSegmenterTest(unittest.TestCase):
 
         self.assertEqual(events[0].type, VadEventType.SPEECH_END)
 
+    def test_continuous_speech_buffer_has_a_hard_duration_limit(self) -> None:
+        vad = FakeVad([0.9] * 10)
+        segmenter = SileroVadSegmenter(
+            vad=vad,  # type: ignore[arg-type]
+            speech_pad_ms=0,
+            max_buffered_speech_seconds=0.1,
+        )
+        chunk = AudioChunk(
+            samples=np.ones((SILERO_FRAME_SIZE * 10, 1), dtype=np.float32),
+            sample_rate=16000,
+        )
+
+        segmenter.accept_chunk(chunk)
+        events = segmenter.flush()
+
+        assert events[0].segment is not None
+        self.assertLessEqual(events[0].segment.duration_seconds, 0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

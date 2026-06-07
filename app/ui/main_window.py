@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import sys
 import time
+import uuid
 
-from PySide6.QtCore import Qt, QThread, QTimer
-from PySide6.QtGui import QFont, QFontDatabase, QIcon
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QFontMetrics, QIcon
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QComboBox,
@@ -24,9 +26,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.chinese_caption import ChineseCaptionComposer
 from app.core.config import AppConfig
 from app.core.demo_stream import DemoSubtitleScript, build_default_demo_script
-from app.core.live_caption import LiveCaptionComposer
 from app.core.recognition_profile import (
     RecognitionProfile,
     get_recognition_profile,
@@ -39,18 +41,184 @@ from app.core.subtitle import (
     SubtitleSegmentStatus,
     SubtitleState,
 )
+from app.translate import (
+    IncrementalTranslationPlanner,
+    SentenceTranslationManager,
+    TranslationConfigurationError,
+    TranslationUpdate,
+    create_partial_translation_client,
+)
 from app.ui.realtime_worker import RealtimeSubtitleWorker
 from app.ui.smooth_caption import SmoothCaptionLabel
 from app.ui.subtitle_overlay import SubtitleOverlayWindow
 from app.ui.theme import apply_app_theme
 
 
+class _WindowTitleBar(QFrame):
+    def __init__(self, window: QMainWindow) -> None:
+        super().__init__(window)
+        self._window = window
+        self._drag_position: QPoint | None = None
+        self.setObjectName("TitleBar")
+        self.setFixedHeight(40)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 6, 0)
+        layout.setSpacing(8)
+
+        mark = QLabel("译")
+        mark.setObjectName("TitleBarMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(22, 22)
+
+        title = QLabel("AI 同声传译助手")
+        title.setObjectName("TitleBarTitle")
+
+        minimize = QPushButton("—")
+        maximize = QPushButton("□")
+        close = QPushButton("×")
+        for button in (minimize, maximize, close):
+            button.setObjectName("WindowButton")
+            button.setFixedSize(36, 28)
+        close.setObjectName("WindowCloseButton")
+
+        minimize.clicked.connect(window.showMinimized)
+        maximize.clicked.connect(self._toggle_maximized)
+        close.clicked.connect(window.close)
+
+        layout.addWidget(mark)
+        layout.addWidget(title)
+        layout.addStretch(1)
+        layout.addWidget(minimize)
+        layout.addWidget(maximize)
+        layout.addWidget(close)
+
+    def _toggle_maximized(self) -> None:
+        if self._window.isMaximized():
+            self._window.showNormal()
+        else:
+            self._window.showMaximized()
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle = self._window.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                event.accept()
+                return
+            self._drag_position = (
+                event.globalPosition().toPoint() - self._window.frameGeometry().topLeft()
+            )
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001
+        if event.buttons() & Qt.MouseButton.LeftButton and self._drag_position is not None:
+            self._window.move(event.globalPosition().toPoint() - self._drag_position)
+            event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: ANN001
+        self._drag_position = None
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: ANN001
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle_maximized()
+            event.accept()
+
+
+class _HistoryItemWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("HistoryEntry")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 9, 12, 10)
+        layout.setSpacing(3)
+
+        self.source_label = QLabel()
+        self.source_label.setObjectName("HistorySource")
+        self.source_label.setWordWrap(True)
+
+        self.translation_label = QLabel()
+        self.translation_label.setObjectName("HistoryTranslation")
+        self.translation_label.setWordWrap(True)
+
+        layout.addWidget(self.source_label)
+        layout.addWidget(self.translation_label)
+
+    def set_content(self, source_text: str, translation_text: str) -> None:
+        self.source_label.setText(source_text)
+        self.translation_label.setText(translation_text)
+        self.translation_label.setVisible(bool(translation_text))
+
+    def recommended_height(self, width: int) -> int:
+        content_width = max(220, width - 24)
+        source_height = _wrapped_text_height(
+            QFontMetrics(self.source_label.font()),
+            self.source_label.text(),
+            content_width,
+        )
+        translation_height = 0
+        if self.translation_label.isVisible():
+            translation_height = _wrapped_text_height(
+                QFontMetrics(self.translation_label.font()),
+                self.translation_label.text(),
+                content_width,
+            )
+        spacing = 3 if translation_height else 0
+        return max(46, 19 + source_height + spacing + translation_height)
+
+
+class _HistoryEmptyWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("HistoryEmpty")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(6)
+        layout.addStretch(1)
+
+        mark = QLabel("译")
+        mark.setObjectName("HistoryEmptyMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(40, 40)
+
+        mark_row = QHBoxLayout()
+        mark_row.addStretch(1)
+        mark_row.addWidget(mark)
+        mark_row.addStretch(1)
+
+        title = QLabel("等待声音输入")
+        title.setObjectName("HistoryEmptyTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        subtitle = QLabel("开始转译后，中文与英文上下文会连续记录在这里")
+        subtitle.setObjectName("HistoryEmptySubtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setWordWrap(True)
+
+        layout.addLayout(mark_row)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addStretch(1)
+
+
 class MainWindow(QMainWindow):
+    translation_ready = Signal(object)
+    realtime_subtitle_event = Signal(int, object)
+    realtime_status_changed = Signal(int, str)
+    realtime_dropped_chunks_changed = Signal(int, int)
+    realtime_error_occurred = Signal(int, str)
+    realtime_warning_occurred = Signal(int, str)
+    realtime_thread_finished = Signal(int)
+
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
         self.config = config
         self.subtitle_state = SubtitleState()
-        self.live_caption_composer = LiveCaptionComposer()
+        self.chinese_caption_composer = ChineseCaptionComposer(max_visible_lines=64)
+        self.translation_planner = IncrementalTranslationPlanner()
+        self._translation_session_id = uuid.uuid4().hex
         self.demo_script: DemoSubtitleScript = build_default_demo_script()
         self.demo_step_index = 0
         self.demo_timer = QTimer(self)
@@ -65,10 +233,42 @@ class MainWindow(QMainWindow):
             SubtitleSegment,
             str,
         ] | None = None
+        self._realtime_generation = 0
+        self._accept_realtime_generation: int | None = None
         self.realtime_thread: QThread | None = None
         self.realtime_worker: RealtimeSubtitleWorker | None = None
+        self.translation_manager: SentenceTranslationManager | None = None
+        self._accepted_partial_translation_words: dict[str, int] = {}
+        self._translation_startup_warning = ""
+        self.translation_ready.connect(self._handle_translation_update)
+        self.realtime_subtitle_event.connect(
+            self._handle_realtime_subtitle_event_for_generation,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.realtime_status_changed.connect(
+            self._set_status_for_generation,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.realtime_dropped_chunks_changed.connect(
+            self._handle_dropped_chunks_changed_for_generation,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.realtime_error_occurred.connect(
+            self._handle_realtime_error_for_generation,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.realtime_warning_occurred.connect(
+            self._handle_realtime_warning_for_generation,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.realtime_thread_finished.connect(
+            self._handle_realtime_finished_for_generation,
+            Qt.ConnectionType.QueuedConnection,
+        )
 
         self.overlay = SubtitleOverlayWindow()
+        self.overlay.visibility_changed.connect(self._sync_overlay_toggle_state)
+        self.overlay.size_mode_changed.connect(self._sync_overlay_size_mode)
         self.status_label: QLabel | None = None
         self.start_button: QPushButton | None = None
         self.pause_button: QPushButton | None = None
@@ -77,10 +277,13 @@ class MainWindow(QMainWindow):
         self.font_size_slider: QSlider | None = None
         self.opacity_slider: QSlider | None = None
         self.display_mode_combo: QComboBox | None = None
+        self.overlay_size_combo: QComboBox | None = None
         self.source_caption_label: SmoothCaptionLabel | None = None
+        self.translation_stable_caption_label: SmoothCaptionLabel | None = None
         self.translation_caption_label: SmoothCaptionLabel | None = None
         self.correction_hint_label: QLabel | None = None
         self.history_list: QListWidget | None = None
+        self.history_count_label: QLabel | None = None
         self._history_items: dict[str, QListWidgetItem] = {}
         self.recognition_mode_group: QButtonGroup | None = None
         self.recognition_mode_buttons: list[QPushButton] = []
@@ -90,21 +293,40 @@ class MainWindow(QMainWindow):
         self._dropped_chunks_warned = False
 
         self.setWindowTitle("AI 同声传译助手")
-        self.setMinimumSize(1120, 720)
-        self.resize(1220, 760)
+        self.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        )
+        self.setMinimumSize(960, 620)
+        self.resize(1120, 700)
 
         root = QWidget()
         root.setObjectName("AppRoot")
         self.setCentralWidget(root)
+        self._create_hidden_caption_state(root)
 
         shell = QVBoxLayout(root)
-        shell.setContentsMargins(24, 22, 24, 22)
-        shell.setSpacing(18)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        shell.addWidget(_WindowTitleBar(self))
 
-        shell.addWidget(self._build_header())
-        shell.addLayout(self._build_content(), stretch=1)
-        shell.addWidget(self._build_status_bar())
+        surface = QWidget()
+        surface.setObjectName("MainSurface")
+        surface_layout = QVBoxLayout(surface)
+        surface_layout.setContentsMargins(22, 16, 22, 22)
+        surface_layout.setSpacing(14)
+        surface_layout.addWidget(self._build_header())
+        surface_layout.addLayout(self._build_content(), stretch=1)
+        shell.addWidget(surface, stretch=1)
         self._sync_overlay_from_controls()
+        self._start_translation_manager()
+
+    def _create_hidden_caption_state(self, parent: QWidget) -> None:
+        self.source_caption_label = SmoothCaptionLabel(parent=parent)
+        self.source_caption_label.hide()
+        self.translation_stable_caption_label = SmoothCaptionLabel(parent=parent)
+        self.translation_stable_caption_label.hide()
+        self.translation_caption_label = SmoothCaptionLabel(parent=parent)
+        self.translation_caption_label.hide()
 
     def _build_header(self) -> QWidget:
         header = QFrame()
@@ -116,9 +338,9 @@ class MainWindow(QMainWindow):
         title_block = QVBoxLayout()
         title_block.setSpacing(4)
 
-        title = QLabel("AI 同声传译助手")
+        title = QLabel("实时转译")
         title.setObjectName("WindowTitle")
-        subtitle = QLabel("系统音频捕获 · 实时字幕 · 上下文修正")
+        subtitle = QLabel("系统输出  ·  English → 简体中文")
         subtitle.setObjectName("WindowSubtitle")
 
         title_block.addWidget(title)
@@ -127,7 +349,7 @@ class MainWindow(QMainWindow):
         status = QLabel("待机")
         status.setObjectName("StatusBadge")
         status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status.setFixedSize(72, 32)
+        status.setFixedSize(68, 28)
         self.status_label = status
 
         layout.addLayout(title_block, stretch=1)
@@ -136,39 +358,64 @@ class MainWindow(QMainWindow):
 
     def _build_content(self) -> QHBoxLayout:
         content = QHBoxLayout()
-        content.setSpacing(18)
+        content.setSpacing(14)
 
-        content.addWidget(self._build_control_panel(), stretch=4)
-        content.addWidget(self._build_settings_panel(), stretch=2)
+        sidebar = self._build_control_panel()
+        sidebar.setFixedWidth(336)
+        content.addWidget(sidebar)
+        content.addWidget(self._build_history_panel(), stretch=1)
         return content
 
     def _build_control_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("Panel")
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(18)
+        layout.setContentsMargins(18, 17, 18, 16)
+        layout.setSpacing(15)
 
         layout.addLayout(self._build_transport_controls())
+        layout.addWidget(self._build_audio_section())
+        layout.addWidget(self._build_mode_section())
+        layout.addWidget(self._divider())
+        layout.addWidget(self._build_subtitle_section())
+        layout.addStretch(1)
 
-        live_title = QLabel("实时字幕")
-        live_title.setObjectName("SectionTitle")
-        layout.addWidget(live_title)
-        layout.addWidget(self._build_live_caption(), stretch=1)
+        hint = QLabel("准备就绪")
+        hint.setObjectName("StatusNote")
+        hint.setWordWrap(True)
+        self.correction_hint_label = hint
+        layout.addWidget(hint)
 
-        history_title = QLabel("双语历史")
-        history_title.setObjectName("SectionTitle")
-        layout.addWidget(history_title)
-        layout.addWidget(self._build_history_list(), stretch=2)
+        dropped_chunks = QLabel("丢帧：0")
+        dropped_chunks.hide()
+        self.dropped_chunks_label = dropped_chunks
 
         return panel
 
-    def _build_transport_controls(self) -> QHBoxLayout:
-        controls = QHBoxLayout()
+    def _build_transport_controls(self) -> QVBoxLayout:
+        controls = QVBoxLayout()
         controls.setSpacing(10)
 
+        heading = QHBoxLayout()
+        heading.setSpacing(8)
+        title = QLabel("转译控制")
+        title.setObjectName("SectionTitle")
+        heading.addWidget(title)
+        heading.addStretch(1)
+
+        latency = QLabel(get_recognition_profile("balanced").latency_hint)
+        latency.setObjectName("MetricPill")
+        latency.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        latency.setFixedSize(100, 26)
+        self.latency_hint_label = latency
+        heading.addWidget(latency)
+        controls.addLayout(heading)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+
         style = self.style()
-        start = QPushButton("开始")
+        start = QPushButton("开始转译")
         start.setObjectName("PrimaryButton")
         start.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         self.start_button = start
@@ -184,65 +431,57 @@ class MainWindow(QMainWindow):
         self.stop_button = stop
 
         for button in (start, pause, stop):
-            button.setMinimumHeight(42)
-            controls.addWidget(button)
+            button.setMinimumHeight(40)
+            button_row.addWidget(button)
 
         start.clicked.connect(self._start_subtitle_stream)
         pause.clicked.connect(self._pause_subtitle_stream)
         stop.clicked.connect(self._stop_subtitle_stream)
 
-        self.overlay_toggle = QPushButton("悬浮字幕")
+        self.overlay_toggle = QPushButton("显示字幕窗")
         self.overlay_toggle.setObjectName("GhostButton")
         self.overlay_toggle.setCheckable(True)
-        self.overlay_toggle.setMinimumHeight(42)
+        self.overlay_toggle.setMinimumHeight(36)
         self.overlay_toggle.clicked.connect(self._toggle_overlay)
+        controls.addLayout(button_row)
         controls.addWidget(self.overlay_toggle)
-
-        controls.addStretch(1)
-
-        latency = QLabel(get_recognition_profile("balanced").latency_hint)
-        latency.setObjectName("MetricPill")
-        latency.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        latency.setFixedSize(116, 34)
-        self.latency_hint_label = latency
-        controls.addWidget(latency)
 
         return controls
 
-    def _build_live_caption(self) -> QWidget:
-        frame = QFrame()
-        frame.setObjectName("LiveCaption")
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(20, 18, 20, 18)
+    def _build_history_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("HistoryPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(10)
 
-        source = SmoothCaptionLabel("等待字幕流启动。")
-        source.setObjectName("SourceCaption")
-        source.setWordWrap(True)
-        source.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.source_caption_label = source
+        heading = QHBoxLayout()
+        heading.setSpacing(8)
 
-        translation = SmoothCaptionLabel(
-            "点击“开始”后，系统将开始监听系统音频或运行内置演示。"
-        )
-        translation.setObjectName("TranslatedCaption")
-        translation.setWordWrap(True)
-        translation.setMinimumHeight(58)
-        translation.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.translation_caption_label = translation
+        title = QLabel("转译记录")
+        title.setObjectName("HistoryTitle")
+        count = QLabel("0 条")
+        count.setObjectName("HistoryCount")
+        count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.history_count_label = count
 
-        correction = QLabel("实时模式：MID_TEXT 会显示为临时字幕，FIN_TEXT 会确认当前字幕。")
-        correction.setObjectName("CorrectionHint")
-        correction.setWordWrap(True)
-        self.correction_hint_label = correction
+        heading.addWidget(title)
+        heading.addStretch(1)
+        heading.addWidget(count)
 
-        layout.addWidget(translation)
-        layout.addWidget(source)
-        layout.addWidget(correction)
-        layout.addStretch(1)
-        return frame
+        subtitle = QLabel("中文优先展示，英文作为上下文参考")
+        subtitle.setObjectName("HistorySubtitle")
+
+        layout.addLayout(heading)
+        layout.addWidget(subtitle)
+        layout.addWidget(self._build_history_list(), stretch=1)
+        return panel
+
+    def _divider(self) -> QFrame:
+        divider = QFrame()
+        divider.setObjectName("Divider")
+        divider.setFixedHeight(1)
+        return divider
 
     def _build_history_list(self) -> QListWidget:
         history = QListWidget()
@@ -252,32 +491,19 @@ class MainWindow(QMainWindow):
         history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         history.setResizeMode(QListView.ResizeMode.Adjust)
         history.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
-        history.addItem("点击“开始”查看字幕历史。")
+        history.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        history.setSpacing(0)
         self.history_list = history
+        self._install_history_placeholder()
 
         return history
-
-    def _build_settings_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setObjectName("Panel")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(18)
-
-        layout.addWidget(self._build_audio_section())
-        layout.addWidget(self._build_mode_section())
-        layout.addWidget(self._build_subtitle_section())
-        layout.addStretch(1)
-
-        return panel
 
     def _build_audio_section(self) -> QWidget:
         section = self._section("音频源")
         layout = section.layout()
 
-        device = QComboBox()
-        device.addItems(["默认系统输出", "扬声器 / 耳机", "虚拟音频设备"])
-        device.setObjectName("Input")
+        device = QLabel("默认系统输出")
+        device.setObjectName("InputValue")
         layout.addWidget(device)
 
         return section
@@ -313,14 +539,14 @@ class MainWindow(QMainWindow):
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
+        grid.setVerticalSpacing(10)
 
         font_label = QLabel("字号")
         font_label.setObjectName("FieldLabel")
         font_size = QSlider(Qt.Orientation.Horizontal)
         font_size.setObjectName("Slider")
-        font_size.setRange(18, 42)
-        font_size.setValue(28)
+        font_size.setRange(12, 22)
+        font_size.setValue(14)
         font_size.valueChanged.connect(self._update_overlay_font_size)
         self.font_size_slider = font_size
 
@@ -329,7 +555,7 @@ class MainWindow(QMainWindow):
         opacity = QSlider(Qt.Orientation.Horizontal)
         opacity.setObjectName("Slider")
         opacity.setRange(40, 100)
-        opacity.setValue(82)
+        opacity.setValue(92)
         opacity.valueChanged.connect(self._update_overlay_opacity)
         self.opacity_slider = opacity
 
@@ -338,8 +564,24 @@ class MainWindow(QMainWindow):
         mode = QComboBox()
         mode.setObjectName("Input")
         mode.addItems(["双语字幕", "仅中文字幕", "仅原文字幕"])
+        mode.setCurrentIndex(
+            {
+                "bilingual": 0,
+                "zh": 1,
+                "source": 2,
+            }.get(self.config.subtitle_mode.strip().lower(), 0)
+        )
         mode.currentIndexChanged.connect(self._update_overlay_display_mode)
         self.display_mode_combo = mode
+
+        size_label = QLabel("窗口")
+        size_label.setObjectName("FieldLabel")
+        size = QComboBox()
+        size.setObjectName("Input")
+        size.addItems(["紧凑", "标准", "宽屏", "自定义"])
+        size.setCurrentIndex(0)
+        size.currentIndexChanged.connect(self._update_overlay_size_preset)
+        self.overlay_size_combo = size
 
         grid.addWidget(font_label, 0, 0)
         grid.addWidget(font_size, 0, 1)
@@ -347,7 +589,14 @@ class MainWindow(QMainWindow):
         grid.addWidget(opacity, 1, 1)
         grid.addWidget(mode_label, 2, 0)
         grid.addWidget(mode, 2, 1)
+        grid.addWidget(size_label, 3, 0)
+        grid.addWidget(size, 3, 1)
         layout.addLayout(grid)
+
+        resize_hint = QLabel("字幕窗可拖动移动，也可从边缘或右下角自由缩放")
+        resize_hint.setObjectName("FieldHint")
+        resize_hint.setWordWrap(True)
+        layout.addWidget(resize_hint)
 
         return section
 
@@ -363,33 +612,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         return section
 
-    def _build_status_bar(self) -> QWidget:
-        bar = QFrame()
-        bar.setObjectName("BottomBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(14)
-
-        items = [
-            f"ASR：{self.config.asr_provider}",
-            f"翻译：{self.config.translation_provider}",
-            f"语言：{self.config.source_language} → {self.config.target_language}",
-            f"字幕：{self.config.subtitle_mode}",
-        ]
-
-        for text in items:
-            label = QLabel(text)
-            label.setObjectName("BottomMeta")
-            layout.addWidget(label)
-
-        dropped_chunks = QLabel("丢帧：0")
-        dropped_chunks.setObjectName("BottomMeta")
-        self.dropped_chunks_label = dropped_chunks
-        layout.addWidget(dropped_chunks)
-
-        layout.addStretch(1)
-        return bar
-
     def _sync_overlay_from_controls(self) -> None:
         if self.font_size_slider is not None:
             self.overlay.set_font_size(self.font_size_slider.value())
@@ -397,6 +619,35 @@ class MainWindow(QMainWindow):
             self.overlay.set_opacity_percent(self.opacity_slider.value())
         if self.display_mode_combo is not None:
             self._update_overlay_display_mode(self.display_mode_combo.currentIndex())
+        if self.overlay_size_combo is not None:
+            self._update_overlay_size_preset(self.overlay_size_combo.currentIndex())
+
+    def _start_translation_manager(self) -> None:
+        if self.translation_manager is not None:
+            return
+        try:
+            client = create_partial_translation_client(self.config)
+        except TranslationConfigurationError as exc:
+            self._translation_startup_warning = str(exc)
+            if self.correction_hint_label is not None:
+                self.correction_hint_label.setText(self._translation_startup_warning)
+            return
+        if client is None:
+            return
+
+        self.translation_manager = SentenceTranslationManager(
+            client=client,
+            source_language=self.config.source_language,
+            target_language=self.config.target_language,
+            on_update=self.translation_ready.emit,
+        )
+        self.translation_manager.begin_session(self._translation_session_id)
+
+    def _stop_translation_manager(self) -> None:
+        if self.translation_manager is None:
+            return
+        self.translation_manager.stop()
+        self.translation_manager = None
 
     def _show_overlay(self) -> None:
         if not self.overlay.isVisible():
@@ -419,6 +670,13 @@ class MainWindow(QMainWindow):
         else:
             self._hide_overlay()
 
+    def _sync_overlay_toggle_state(self, visible: bool) -> None:
+        if self.overlay_toggle is None:
+            return
+        self.overlay_toggle.blockSignals(True)
+        self.overlay_toggle.setChecked(visible)
+        self.overlay_toggle.blockSignals(False)
+
     def _update_overlay_font_size(self, value: int) -> None:
         self.overlay.set_font_size(value)
 
@@ -433,6 +691,28 @@ class MainWindow(QMainWindow):
         }.get(index, "bilingual")
         self.overlay.set_display_mode(mode)
 
+    def _update_overlay_size_preset(self, index: int) -> None:
+        preset = {
+            0: "compact",
+            1: "standard",
+            2: "wide",
+        }.get(index)
+        if preset is not None:
+            self.overlay.set_size_preset(preset)
+
+    def _sync_overlay_size_mode(self, mode: str) -> None:
+        if self.overlay_size_combo is None:
+            return
+        index = {
+            "compact": 0,
+            "standard": 1,
+            "wide": 2,
+            "custom": 3,
+        }.get(mode, 3)
+        self.overlay_size_combo.blockSignals(True)
+        self.overlay_size_combo.setCurrentIndex(index)
+        self.overlay_size_combo.blockSignals(False)
+
     def _start_subtitle_stream(self) -> None:
         if self._is_realtime_running():
             return
@@ -443,6 +723,9 @@ class MainWindow(QMainWindow):
 
         self.demo_timer.stop()
         self._reset_realtime_state()
+        self._realtime_generation += 1
+        generation = self._realtime_generation
+        self._accept_realtime_generation = generation
         self._show_overlay()
         self._set_transport_running(True)
         self._set_status("启动中")
@@ -453,8 +736,7 @@ class MainWindow(QMainWindow):
         self._set_dropped_chunks_display(0)
         if self.correction_hint_label is not None:
             self.correction_hint_label.setText(
-                f"识别模式：{profile.label} · VAD {profile.min_silence_ms}ms · "
-                f"回灌 {profile.preroll_seconds:.1f}s"
+                f"已启用{profile.label}模式，正在监听系统音频。"
             )
 
         thread = QThread(self)
@@ -464,19 +746,49 @@ class MainWindow(QMainWindow):
             preroll_seconds=profile.preroll_seconds,
             queue_size=profile.queue_size,
             dropped_chunks_warn_threshold=profile.dropped_chunks_warn_threshold,
+            max_stream_duration_seconds=profile.max_stream_duration_seconds,
         )
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
-        worker.subtitle_event.connect(self._handle_realtime_subtitle_event)
-        worker.status_changed.connect(self._set_status)
-        worker.dropped_chunks_changed.connect(self._handle_dropped_chunks_changed)
-        worker.error_occurred.connect(self._handle_realtime_error)
-        worker.warning_occurred.connect(self._handle_realtime_warning)
+        worker.subtitle_event.connect(
+            lambda event, generation=generation: self.realtime_subtitle_event.emit(
+                generation,
+                event,
+            )
+        )
+        worker.status_changed.connect(
+            lambda status, generation=generation: self.realtime_status_changed.emit(
+                generation,
+                status,
+            )
+        )
+        worker.dropped_chunks_changed.connect(
+            lambda dropped, generation=generation: self.realtime_dropped_chunks_changed.emit(
+                generation,
+                dropped,
+            )
+        )
+        worker.error_occurred.connect(
+            lambda message, generation=generation: self.realtime_error_occurred.emit(
+                generation,
+                message,
+            )
+        )
+        worker.warning_occurred.connect(
+            lambda message, generation=generation: self.realtime_warning_occurred.emit(
+                generation,
+                message,
+            )
+        )
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._handle_realtime_finished)
+        thread.finished.connect(
+            lambda generation=generation: self.realtime_thread_finished.emit(
+                generation
+            )
+        )
 
         self.realtime_thread = thread
         self.realtime_worker = worker
@@ -505,12 +817,82 @@ class MainWindow(QMainWindow):
         return self.realtime_thread is not None and self.realtime_thread.isRunning()
 
     def _stop_realtime_worker(self) -> None:
+        self._accept_realtime_generation = None
         if self.realtime_worker is not None:
             self.realtime_worker.stop()
 
+    def _is_accepted_realtime_generation(self, generation: int) -> bool:
+        return generation == self._accept_realtime_generation
+
+    def _handle_realtime_subtitle_event_for_generation(
+        self,
+        generation: int,
+        event: SubtitleEvent,
+    ) -> None:
+        if not self._is_accepted_realtime_generation(generation):
+            return
+        self._handle_realtime_subtitle_event(event)
+
+    def _set_status_for_generation(self, generation: int, status: str) -> None:
+        if not self._is_accepted_realtime_generation(generation):
+            return
+        self._set_status(status)
+
+    def _handle_dropped_chunks_changed_for_generation(
+        self,
+        generation: int,
+        dropped_chunks: int,
+    ) -> None:
+        if not self._is_accepted_realtime_generation(generation):
+            return
+        self._handle_dropped_chunks_changed(dropped_chunks)
+
+    def _handle_realtime_error_for_generation(
+        self,
+        generation: int,
+        message: str,
+    ) -> None:
+        if not self._is_accepted_realtime_generation(generation):
+            return
+        self._handle_realtime_error(message)
+
+    def _handle_realtime_warning_for_generation(
+        self,
+        generation: int,
+        message: str,
+    ) -> None:
+        if not self._is_accepted_realtime_generation(generation):
+            return
+        self._handle_realtime_warning(message)
+
+    def _handle_realtime_finished_for_generation(self, generation: int) -> None:
+        if generation != self._realtime_generation:
+            return
+        self._accept_realtime_generation = None
+        self._handle_realtime_finished()
+
     def _handle_realtime_subtitle_event(self, event: SubtitleEvent) -> None:
+        has_incoming_translation = (
+            bool(event.zh_text.strip())
+            and event.source_text.strip() != event.zh_text.strip()
+        )
+        event = self._with_preserved_translation(event)
         segment = self.subtitle_state.apply(event)
+        if has_incoming_translation and _is_realtime_asr_segment(segment):
+            if event.type == SubtitleEventType.FINAL:
+                self.chinese_caption_composer.accept_final(
+                    segment_id=segment.segment_id,
+                    source_version=segment.version,
+                    translated_text=event.zh_text,
+                )
+            elif event.type == SubtitleEventType.PARTIAL:
+                self.chinese_caption_composer.accept_draft(
+                    segment_id=segment.segment_id,
+                    source_version=segment.version,
+                    translated_text=event.zh_text,
+                )
         display_text = self._compose_realtime_display_text(event, segment)
+        self._maybe_submit_translation(event, segment)
         if event.type == SubtitleEventType.PARTIAL:
             self._pending_realtime_render = (event, segment, display_text)
             if not self.realtime_render_timer.isActive():
@@ -528,6 +910,172 @@ class MainWindow(QMainWindow):
             return
         event, segment, display_text = pending
         self._render_subtitle_event(event, segment, display_text=display_text)
+
+    def _with_preserved_translation(self, event: SubtitleEvent) -> SubtitleEvent:
+        if event.type not in {SubtitleEventType.PARTIAL, SubtitleEventType.FINAL}:
+            return event
+        if event.source_text.strip() != event.zh_text.strip():
+            return event
+
+        previous = self.subtitle_state.get(event.segment_id)
+        if previous is None:
+            return event
+        if not _has_distinct_translation(previous):
+            return event
+        if not _is_compatible_source_update(previous.source_text, event.source_text):
+            return event
+
+        if event.type == SubtitleEventType.FINAL:
+            return SubtitleEvent.final(
+                event.segment_id,
+                event.source_text,
+                previous.zh_text,
+                translation_source_text=(
+                    previous.translation_source_text or previous.source_text
+                ),
+            )
+        return SubtitleEvent.partial(
+            event.segment_id,
+            event.source_text,
+            previous.zh_text,
+            translation_source_text=(
+                previous.translation_source_text or previous.source_text
+            ),
+        )
+
+    def _maybe_submit_translation(
+        self,
+        event: SubtitleEvent,
+        segment: SubtitleSegment,
+    ) -> None:
+        if self.translation_manager is None:
+            return
+        if not _is_realtime_asr_segment(segment):
+            return
+        if event.type not in {SubtitleEventType.PARTIAL, SubtitleEventType.FINAL}:
+            return
+        if not segment.source_text.strip():
+            return
+
+        is_final = event.type == SubtitleEventType.FINAL
+        if is_final:
+            self._accepted_partial_translation_words.pop(segment.segment_id, None)
+            plan = self.translation_planner.observe_final(
+                segment_id=segment.segment_id,
+                source_version=segment.version,
+                source_text=segment.source_text,
+            )
+        else:
+            plan = self.translation_planner.observe_partial(
+                segment_id=segment.segment_id,
+                source_version=segment.version,
+                source_text=segment.source_text,
+                observed_at=time.monotonic(),
+            )
+        if plan is None:
+            return
+
+        self.translation_manager.submit(
+            session_id=self._translation_session_id,
+            segment_id=plan.segment_id,
+            source_version=plan.source_version,
+            source_text=plan.source_text,
+            is_final=plan.is_final,
+            allow_source_prefix=not plan.is_final,
+        )
+
+    def _handle_translation_update(self, update: object) -> None:
+        if not isinstance(update, TranslationUpdate):
+            return
+        if update.session_id not in {"default", self._translation_session_id}:
+            return
+        translated_text = update.translated_text.strip()
+        if not translated_text:
+            return
+
+        current = self.subtitle_state.get(update.segment_id)
+        if current is None:
+            return
+
+        if update.is_final:
+            if current.version != update.source_version:
+                return
+            if current.source_text.strip() != update.source_text.strip():
+                return
+            event = SubtitleEvent.final(
+                update.segment_id,
+                current.source_text,
+                translated_text,
+                translation_source_text=update.source_text,
+            )
+            self.chinese_caption_composer.accept_final(
+                segment_id=update.segment_id,
+                source_version=update.source_version,
+                translated_text=translated_text,
+            )
+        else:
+            if current.status != SubtitleSegmentStatus.PARTIAL:
+                return
+            if update.allow_source_prefix:
+                if not _is_source_prefix(update.source_text, current.source_text):
+                    return
+                translated_words = len(update.source_text.split())
+                accepted_words = self._accepted_partial_translation_words.get(
+                    update.segment_id,
+                    0,
+                )
+                if translated_words < accepted_words:
+                    return
+                self._accepted_partial_translation_words[update.segment_id] = (
+                    translated_words
+                )
+            elif current.source_text.strip() != update.source_text.strip():
+                return
+            event = SubtitleEvent.partial(
+                update.segment_id,
+                current.source_text,
+                translated_text,
+                translation_source_text=update.source_text,
+            )
+            self.chinese_caption_composer.accept_draft(
+                segment_id=update.segment_id,
+                source_version=update.source_version,
+                translated_text=translated_text,
+            )
+
+        segment = self.subtitle_state.apply(event)
+        display_text = self._compose_realtime_display_text(event, segment)
+        self._render_translation_update(event, segment, display_text=display_text)
+
+    def _render_translation_update(
+        self,
+        event: SubtitleEvent,
+        segment: SubtitleSegment,
+        *,
+        display_text: str,
+    ) -> None:
+        latest = self._latest_realtime_segment()
+        if latest is None or latest.segment_id == segment.segment_id:
+            self._render_subtitle_event(event, segment, display_text=display_text)
+            return
+
+        self._render_history_segment(segment)
+        latest_display_text = self._compose_realtime_display_text(event, latest)
+        self._render_subtitle_event(
+            event,
+            latest,
+            display_text=latest_display_text,
+        )
+
+    def _latest_realtime_segment(self) -> SubtitleSegment | None:
+        fallback: SubtitleSegment | None = None
+        for segment in reversed(self.subtitle_state.segments()):
+            if _is_realtime_asr_segment(segment):
+                if fallback is None:
+                    fallback = segment
+                if segment.status == SubtitleSegmentStatus.PARTIAL:
+                    return segment
+        return fallback
 
     def _handle_realtime_error(self, message: str) -> None:
         self._set_status("异常")
@@ -644,18 +1192,8 @@ class MainWindow(QMainWindow):
         event: SubtitleEvent,
         segment: SubtitleSegment,
     ) -> str:
-        if event.type == SubtitleEventType.PARTIAL:
-            frame = self.live_caption_composer.compose_partial(
-                segment.segment_id,
-                segment.source_text,
-                observed_at=time.monotonic(),
-            )
-        else:
-            frame = self.live_caption_composer.compose_final(
-                segment.segment_id,
-                segment.source_text,
-            )
-        return frame.text
+        del event
+        return " ".join(segment.source_text.split())
 
     def _render_subtitle_event(
         self,
@@ -665,34 +1203,78 @@ class MainWindow(QMainWindow):
         display_text: str | None = None,
     ) -> None:
         source_display_text = segment.source_text if display_text is None else display_text
-        has_translation = segment.source_text.strip() != segment.zh_text.strip()
-        translation_display_text = segment.zh_text if has_translation else ""
+        translation_frame_is_final = False
+        if _is_realtime_asr_segment(segment):
+            source_display_text = self._build_realtime_source_display(
+                segment,
+                source_display_text,
+            )
+            translation_frame = self.chinese_caption_composer.current_frame()
+            translation_display_text = translation_frame.text
+            translation_frame_is_final = translation_frame.is_final
+        else:
+            translation_display_text = self._translation_display_for_segment(segment)
         if self.source_caption_label is not None:
             self.source_caption_label.set_caption_text(
                 source_display_text,
                 animate=False,
             )
-            self.source_caption_label.setVisible(True)
+        translation_lines = [
+            line.strip()
+            for line in translation_display_text.splitlines()
+            if line.strip()
+        ][-4:]
+        stable_translation = "\n".join(translation_lines[:-1])
+        active_translation = translation_lines[-1] if translation_lines else ""
+        if self.translation_stable_caption_label is not None:
+            self.translation_stable_caption_label.set_caption_text(
+                stable_translation,
+                animate=False,
+            )
         if self.translation_caption_label is not None:
-            self.translation_caption_label.set_caption_text(translation_display_text)
+            self.translation_caption_label.set_caption_text(active_translation)
         if self.correction_hint_label is not None:
             hint = self._build_event_hint(event, segment)
             if hint != self.correction_hint_label.text():
                 self.correction_hint_label.setText(hint)
 
+        overlay_state = segment.status.value
+        if (
+            _is_realtime_asr_segment(segment)
+            and translation_frame_is_final
+            and translation_display_text.strip()
+            and overlay_state == SubtitleSegmentStatus.PARTIAL.value
+        ):
+            overlay_state = SubtitleSegmentStatus.FINAL.value
+        if (
+            _is_realtime_asr_segment(segment)
+            and segment.status == SubtitleSegmentStatus.FINAL
+            and not self.chinese_caption_composer.is_segment_final(segment.segment_id)
+        ):
+            overlay_state = "finalizing"
         self.overlay.set_caption(
             source_text=source_display_text,
             zh_text=translation_display_text,
-            state=segment.status.value,
+            state=overlay_state,
         )
         self._render_history_segment(segment)
+
+    def _translation_display_for_segment(self, segment: SubtitleSegment) -> str:
+        return segment.zh_text if _has_distinct_translation(segment) else ""
+
+    def _build_realtime_source_display(
+        self,
+        segment: SubtitleSegment,
+        current_display_text: str,
+    ) -> str:
+        del segment
+        return " ".join(current_display_text.split())
 
     def _render_history_segment(self, segment: SubtitleSegment) -> None:
         if self.history_list is None:
             return
 
         item = self._history_items.get(segment.segment_id)
-        is_new = item is None
         if item is None:
             if (
                 not self._history_items
@@ -702,12 +1284,20 @@ class MainWindow(QMainWindow):
                 self.history_list.clear()
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, segment.segment_id)
+            item.setForeground(QBrush(QColor(0, 0, 0, 0)))
             self.history_list.addItem(item)
             self._history_items[segment.segment_id] = item
 
         text = self._format_history_item(segment)
         if item.text() != text:
             item.setText(text)
+        source_text, translation_text = self._history_text_parts(segment)
+        entry = self.history_list.itemWidget(item)
+        if not isinstance(entry, _HistoryItemWidget):
+            entry = _HistoryItemWidget()
+            self.history_list.setItemWidget(item, entry)
+        entry.set_content(source_text, translation_text)
+        self._resize_history_item(item, entry)
 
         active_ids = {current.segment_id for current in self.subtitle_state.segments()}
         for stale_id in set(self._history_items) - active_ids:
@@ -716,38 +1306,92 @@ class MainWindow(QMainWindow):
             if row >= 0:
                 self.history_list.takeItem(row)
 
-        if is_new:
-            self.history_list.scrollToBottom()
+        self._update_history_count()
         self.history_list.scrollToBottom()
 
     def _build_event_hint(self, event: SubtitleEvent, segment: SubtitleSegment) -> str:
         if segment.status == SubtitleSegmentStatus.UPDATED:
-            reason = event.reason or "context_correction"
-            return f"已修正：{reason}"
+            return "字幕已根据上下文更新"
         if segment.status == SubtitleSegmentStatus.FINAL:
             if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
-                return "FIN_TEXT：当前语音段已确认，翻译模块接入后会替换为中文字幕。"
-            return "正式字幕：当前语音段已稳定。"
+                return "英文已确认，正在生成中文字幕"
+            return "当前字幕已完成"
         if segment.segment_id.startswith("asr_") and segment.source_text == segment.zh_text:
-            return "MID_TEXT：实时识别中的临时字幕，后续 FIN_TEXT 会回写确认。"
-        return "临时字幕：优先保证低延迟，后续上下文可能回写修正。"
+            return "正在识别并生成中文字幕"
+        return "中文字幕正在同步更新"
 
     def _format_history_item(self, segment: SubtitleSegment) -> str:
-        state_label = {
-            SubtitleSegmentStatus.PARTIAL: "实时",
-            SubtitleSegmentStatus.FINAL: "确认",
-            SubtitleSegmentStatus.UPDATED: "修正",
-        }[segment.status]
-        revision_marker = " · 已回写" if segment.revisions else ""
-        if segment.source_text == segment.zh_text:
-            return f"{state_label}{revision_marker}  {segment.source_text}"
-        return f"{state_label}{revision_marker}  {segment.zh_text}\n{segment.source_text}"
+        source_text, translation_text = self._history_text_parts(segment)
+        if not translation_text:
+            return source_text
+        return f"{source_text}\n{translation_text}"
+
+    def _history_text_parts(self, segment: SubtitleSegment) -> tuple[str, str]:
+        source_text = " ".join(segment.source_text.split())
+        translation_text = ""
+        if _has_distinct_translation(segment):
+            if segment.translation_source_text.strip():
+                source_text = " ".join(segment.translation_source_text.split())
+            translation_text = " ".join(segment.zh_text.split())
+        return source_text, translation_text
+
+    def _resize_history_item(
+        self,
+        item: QListWidgetItem,
+        entry: _HistoryItemWidget,
+    ) -> None:
+        if self.history_list is None:
+            return
+        width = max(280, self.history_list.viewport().width() - 4)
+        item.setSizeHint(QSize(width, entry.recommended_height(width)))
+
+    def _resize_history_items(self) -> None:
+        if self.history_list is None:
+            return
+        if not self._history_items and self.history_list.count() == 1:
+            placeholder = self.history_list.item(0)
+            if placeholder.data(Qt.ItemDataRole.UserRole) is None:
+                height = max(180, self.history_list.viewport().height() - 10)
+                placeholder.setSizeHint(
+                    QSize(self.history_list.viewport().width() - 4, height)
+                )
+        for item in self._history_items.values():
+            entry = self.history_list.itemWidget(item)
+            if isinstance(entry, _HistoryItemWidget):
+                self._resize_history_item(item, entry)
+
+    def _update_history_count(self) -> None:
+        if self.history_count_label is not None:
+            self.history_count_label.setText(f"{len(self._history_items)} 条")
+
+    def _reset_history_placeholder(self) -> None:
+        if self.history_list is None:
+            return
+        self.history_list.clear()
+        self._history_items.clear()
+        self._install_history_placeholder()
+        self._update_history_count()
+
+    def _install_history_placeholder(self) -> None:
+        if self.history_list is None:
+            return
+        item = QListWidgetItem("开始转译后，双语内容会连续记录在这里")
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        item.setForeground(QBrush(QColor(0, 0, 0, 0)))
+        self.history_list.addItem(item)
+        self.history_list.setItemWidget(item, _HistoryEmptyWidget())
+        QTimer.singleShot(0, self._resize_history_items)
 
     def _reset_realtime_state(self) -> None:
         self.realtime_render_timer.stop()
         self._pending_realtime_render = None
         self.subtitle_state = SubtitleState()
-        self.live_caption_composer.reset()
+        self.chinese_caption_composer.reset()
+        self.translation_planner.reset()
+        self._accepted_partial_translation_words.clear()
+        self._translation_session_id = uuid.uuid4().hex
+        if self.translation_manager is not None:
+            self.translation_manager.begin_session(self._translation_session_id)
         self._dropped_chunks_warned = False
         self._set_dropped_chunks_display(0)
         if self.source_caption_label is not None:
@@ -755,17 +1399,17 @@ class MainWindow(QMainWindow):
                 "等待系统音频中的语音。",
                 animate=False,
             )
+        if self.translation_stable_caption_label is not None:
+            self.translation_stable_caption_label.set_caption_text("", animate=False)
+            self.translation_stable_caption_label.hide()
         if self.translation_caption_label is not None:
             self.translation_caption_label.set_caption_text(
                 "实时 ASR 已准备，识别结果会先以原文字幕展示。",
                 animate=False,
             )
         if self.correction_hint_label is not None:
-            self.correction_hint_label.setText("MID_TEXT 作为临时字幕，FIN_TEXT 作为正式字幕。")
-        if self.history_list is not None:
-            self.history_list.clear()
-            self._history_items.clear()
-            self.history_list.addItem("实时字幕历史将在这里更新。")
+            self.correction_hint_label.setText("准备就绪")
+        self._reset_history_placeholder()
         self.overlay.set_caption(
             source_text="等待系统音频中的语音。",
             zh_text="实时 ASR 已准备。",
@@ -776,7 +1420,9 @@ class MainWindow(QMainWindow):
         self.realtime_render_timer.stop()
         self._pending_realtime_render = None
         self.subtitle_state = SubtitleState()
-        self.live_caption_composer.reset()
+        self.chinese_caption_composer.reset()
+        self.translation_planner.reset()
+        self._accepted_partial_translation_words.clear()
         self.demo_script = build_default_demo_script()
         self.demo_step_index = 0
         if self.source_caption_label is not None:
@@ -784,33 +1430,37 @@ class MainWindow(QMainWindow):
                 "等待模拟字幕流启动。",
                 animate=False,
             )
+        if self.translation_stable_caption_label is not None:
+            self.translation_stable_caption_label.set_caption_text("", animate=False)
+            self.translation_stable_caption_label.hide()
         if self.translation_caption_label is not None:
             self.translation_caption_label.set_caption_text(
                 "点击“开始”后，系统将演示临时字幕、正式字幕和历史修正。",
                 animate=False,
             )
         if self.correction_hint_label is not None:
-            self.correction_hint_label.setText(
-                "演示模式：使用内置技术分享字幕脚本，不调用外部 AI 服务。"
-            )
-        if self.history_list is not None:
-            self.history_list.clear()
-            self._history_items.clear()
-            self.history_list.addItem("点击“开始”查看模拟字幕历史。")
+            self.correction_hint_label.setText("正在运行内置字幕演示")
+        self._reset_history_placeholder()
         self.overlay.set_sample_caption()
 
     def _set_status(self, status: str) -> None:
         if self.status_label is not None:
             self.status_label.setText(status)
 
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._resize_history_items)
+
     def closeEvent(self, event) -> None:  # noqa: ANN001
         self.demo_timer.stop()
         self.realtime_render_timer.stop()
+        self._accept_realtime_generation = None
         if self.realtime_worker is not None:
             self.realtime_worker.stop()
         if self.realtime_thread is not None and self.realtime_thread.isRunning():
             self.realtime_thread.quit()
             self.realtime_thread.wait(2000)
+        self._stop_translation_manager()
         self.overlay.close()
         super().closeEvent(event)
 
@@ -847,3 +1497,52 @@ def _select_ui_font_family() -> str:
         if family in available_fonts:
             return family
     return candidates[0]
+
+
+def _is_realtime_asr_segment(segment: SubtitleSegment) -> bool:
+    return segment.segment_id.startswith("asr_")
+
+
+def _has_distinct_translation(segment: SubtitleSegment) -> bool:
+    return bool(segment.zh_text.strip()) and (
+        segment.source_text.strip() != segment.zh_text.strip()
+    )
+
+
+def _is_compatible_source_update(old_text: str, new_text: str) -> bool:
+    old_words = _normalized_words(old_text)
+    new_words = _normalized_words(new_text)
+    if not old_words or not new_words:
+        return False
+    common_prefix = 0
+    for old_word, new_word in zip(old_words, new_words, strict=False):
+        if old_word != new_word:
+            break
+        common_prefix += 1
+    shorter_length = min(len(old_words), len(new_words))
+    return common_prefix >= max(1, shorter_length - 1)
+
+
+def _is_source_prefix(prefix_text: str, full_text: str) -> bool:
+    prefix_words = _normalized_words(prefix_text)
+    full_words = _normalized_words(full_text)
+    if not prefix_words:
+        return False
+    if len(prefix_words) > len(full_words):
+        return False
+    return prefix_words == full_words[: len(prefix_words)]
+
+
+def _normalized_words(text: str) -> list[str]:
+    return text.casefold().split()
+
+
+def _wrapped_text_height(metrics: QFontMetrics, text: str, width: int) -> int:
+    if not text:
+        return 0
+    bounds = metrics.boundingRect(
+        QRect(0, 0, width, 10_000),
+        Qt.TextFlag.TextWordWrap,
+        text,
+    )
+    return bounds.height()

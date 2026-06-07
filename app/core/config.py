@@ -18,6 +18,11 @@ class AppConfig:
     asr_timeout_seconds: float = 30.0
     translation_provider: str = "mock"
     translation_api_key: str = ""
+    partial_translation_provider: str = ""
+    partial_translation_app_id: str = ""
+    partial_translation_api_key: str = ""
+    partial_translation_secret_key: str = ""
+    partial_translation_timeout_seconds: float = 10.0
     source_language: str = "en"
     target_language: str = "zh-CN"
     subtitle_mode: str = "bilingual"
@@ -45,11 +50,36 @@ class AppConfig:
                 "TRANSLATION_API_KEY",
                 cls.translation_api_key,
             ),
+            partial_translation_provider=os.getenv(
+                "PARTIAL_TRANSLATION_PROVIDER",
+                cls.partial_translation_provider,
+            ),
+            partial_translation_app_id=os.getenv(
+                "PARTIAL_TRANSLATION_APP_ID",
+                cls.partial_translation_app_id,
+            ),
+            partial_translation_api_key=os.getenv(
+                "PARTIAL_TRANSLATION_API_KEY",
+                cls.partial_translation_api_key,
+            ),
+            partial_translation_secret_key=(
+                os.getenv("PARTIAL_TRANSLATION_SECRET_KEY")
+                or os.getenv("PARTIAL_TRANSLATION_SECRET")
+                or cls.partial_translation_secret_key
+            ),
+            partial_translation_timeout_seconds=_env_float(
+                "PARTIAL_TRANSLATION_TIMEOUT_SECONDS",
+                cls.partial_translation_timeout_seconds,
+            ),
             source_language=os.getenv("SOURCE_LANGUAGE", cls.source_language),
             target_language=os.getenv("TARGET_LANGUAGE", cls.target_language),
             subtitle_mode=os.getenv("SUBTITLE_MODE", cls.subtitle_mode),
             log_level=os.getenv("LOG_LEVEL", cls.log_level),
         )
+
+    @property
+    def active_translation_provider(self) -> str:
+        return self.partial_translation_provider.strip() or self.translation_provider
 
     def with_log_level(self, log_level: str) -> AppConfig:
         return AppConfig(
@@ -62,6 +92,11 @@ class AppConfig:
             asr_timeout_seconds=self.asr_timeout_seconds,
             translation_provider=self.translation_provider,
             translation_api_key=self.translation_api_key,
+            partial_translation_provider=self.partial_translation_provider,
+            partial_translation_app_id=self.partial_translation_app_id,
+            partial_translation_api_key=self.partial_translation_api_key,
+            partial_translation_secret_key=self.partial_translation_secret_key,
+            partial_translation_timeout_seconds=self.partial_translation_timeout_seconds,
             source_language=self.source_language,
             target_language=self.target_language,
             subtitle_mode=self.subtitle_mode,
@@ -79,6 +114,17 @@ class AppConfig:
             "asr_timeout_seconds": self.asr_timeout_seconds,
             "translation_provider": self.translation_provider,
             "translation_api_key": self._mask_secret(self.translation_api_key),
+            "partial_translation_provider": self.partial_translation_provider,
+            "partial_translation_app_id": self.partial_translation_app_id,
+            "partial_translation_api_key": self._mask_secret(
+                self.partial_translation_api_key
+            ),
+            "partial_translation_secret_key": self._mask_secret(
+                self.partial_translation_secret_key
+            ),
+            "partial_translation_timeout_seconds": (
+                self.partial_translation_timeout_seconds
+            ),
             "source_language": self.source_language,
             "target_language": self.target_language,
             "subtitle_mode": self.subtitle_mode,

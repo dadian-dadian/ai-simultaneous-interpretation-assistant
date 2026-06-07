@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -40,6 +41,13 @@ class FakeWebSocket:
 
     def settimeout(self, timeout: float) -> None:
         self.timeout = timeout
+
+
+class TimeoutAfterMessagesWebSocket(FakeWebSocket):
+    def recv(self) -> str:
+        if not self.messages:
+            raise websocket.WebSocketTimeoutException("still open")
+        return self.messages.pop(0)
 
 
 class MockAsrClientTest(unittest.TestCase):
@@ -104,6 +112,45 @@ class BaiduRealtimeAsrClientTest(unittest.TestCase):
 
         self.assertEqual(json.loads(fake_ws.text_frames[-1])["type"], "FINISH")
         self.assertEqual(result.text, "hello")
+
+    def test_finish_returns_after_final_even_if_socket_stays_open(self) -> None:
+        audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
+        fake_ws = TimeoutAfterMessagesWebSocket(
+            messages=['{"type":"FIN_TEXT","err_no":0,"result":"hello"}']
+        )
+        client = BaiduRealtimeAsrClient(
+            app_id="123",
+            app_key="app-key",
+            timeout_seconds=30,
+        )
+
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            session = client.start_stream(language="en")
+            session.send_audio(audio)
+            started_at = time.monotonic()
+            result = session.finish(duration_seconds=1.0)
+
+        self.assertLess(time.monotonic() - started_at, 1.5)
+        self.assertEqual(result.text, "hello")
+        self.assertTrue(fake_ws.closed)
+
+    def test_multiple_final_text_segments_are_joined_with_spaces(self) -> None:
+        audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)
+        fake_ws = FakeWebSocket(
+            messages=[
+                '{"type":"FIN_TEXT","err_no":0,"result":"First sentence.",'
+                '"start_time":0,"end_time":1000}',
+                '{"type":"FIN_TEXT","err_no":0,"result":"Second sentence.",'
+                '"start_time":1000,"end_time":2000}',
+            ]
+        )
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
+
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            result = client.transcribe(audio, language="en")
+
+        self.assertEqual(result.text, "First sentence. Second sentence.")
+        self.assertEqual(len(result.segments), 2)
 
     def test_no_effective_speech_after_partial_uses_latest_partial(self) -> None:
         audio = AudioChunk(samples=np.zeros((16000, 1), dtype=np.float32), sample_rate=16000)

@@ -24,26 +24,43 @@ class SubtitleEvent:
     segment_id: str
     source_text: str = ""
     zh_text: str = ""
+    translation_source_text: str = ""
     old_source_text: str = ""
     old_zh_text: str = ""
     reason: str = ""
 
     @classmethod
-    def partial(cls, segment_id: str, source_text: str, zh_text: str) -> SubtitleEvent:
+    def partial(
+        cls,
+        segment_id: str,
+        source_text: str,
+        zh_text: str,
+        *,
+        translation_source_text: str = "",
+    ) -> SubtitleEvent:
         return cls(
             type=SubtitleEventType.PARTIAL,
             segment_id=segment_id,
             source_text=source_text,
             zh_text=zh_text,
+            translation_source_text=translation_source_text,
         )
 
     @classmethod
-    def final(cls, segment_id: str, source_text: str, zh_text: str) -> SubtitleEvent:
+    def final(
+        cls,
+        segment_id: str,
+        source_text: str,
+        zh_text: str,
+        *,
+        translation_source_text: str = "",
+    ) -> SubtitleEvent:
         return cls(
             type=SubtitleEventType.FINAL,
             segment_id=segment_id,
             source_text=source_text,
             zh_text=zh_text,
+            translation_source_text=translation_source_text,
         )
 
     @classmethod
@@ -73,6 +90,7 @@ class SubtitleEvent:
             segment_id=payload["segment_id"],
             source_text=payload.get("source_text", ""),
             zh_text=payload.get("zh_text", ""),
+            translation_source_text=payload.get("translation_source_text", ""),
             old_source_text=payload.get("old_source_text", ""),
             old_zh_text=payload.get("old_zh_text", ""),
             reason=payload.get("reason", ""),
@@ -85,6 +103,8 @@ class SubtitleEvent:
             "source_text": self.source_text,
             "zh_text": self.zh_text,
         }
+        if self.translation_source_text:
+            payload["translation_source_text"] = self.translation_source_text
         if self.old_source_text:
             payload["old_source_text"] = self.old_source_text
         if self.old_zh_text:
@@ -106,6 +126,7 @@ class SubtitleSegment:
     segment_id: str
     source_text: str = ""
     zh_text: str = ""
+    translation_source_text: str = ""
     status: SubtitleSegmentStatus = SubtitleSegmentStatus.PARTIAL
     version: int = 0
     revisions: list[SubtitleRevision] = field(default_factory=list)
@@ -115,6 +136,7 @@ class SubtitleSegment:
             "segment_id": self.segment_id,
             "source_text": self.source_text,
             "zh_text": self.zh_text,
+            "translation_source_text": self.translation_source_text,
             "status": self.status.value,
             "version": self.version,
             "revisions": [
@@ -168,6 +190,10 @@ class SubtitleState:
 
         segment.source_text = event.source_text
         segment.zh_text = event.zh_text
+        segment.translation_source_text = _translation_source_for_event(
+            event,
+            previous=segment.translation_source_text,
+        )
         segment.version += 1
         self._touch(event.segment_id)
         self._trim()
@@ -182,6 +208,10 @@ class SubtitleState:
         changed = segment.source_text != event.source_text or segment.zh_text != event.zh_text
         segment.source_text = event.source_text
         segment.zh_text = event.zh_text
+        segment.translation_source_text = _translation_source_for_event(
+            event,
+            previous=segment.translation_source_text,
+        )
         segment.status = SubtitleSegmentStatus.FINAL
         if changed:
             segment.version += 1
@@ -205,6 +235,10 @@ class SubtitleState:
         )
         segment.source_text = event.source_text
         segment.zh_text = event.zh_text
+        segment.translation_source_text = _translation_source_for_event(
+            event,
+            previous=segment.translation_source_text,
+        )
         segment.status = SubtitleSegmentStatus.UPDATED
         segment.version += 1
         self._touch(event.segment_id)
@@ -216,3 +250,15 @@ class SubtitleState:
     def _trim(self) -> None:
         while len(self._segments) > self.max_segments:
             self._segments.popitem(last=False)
+
+
+def _translation_source_for_event(
+    event: SubtitleEvent,
+    *,
+    previous: str = "",
+) -> str:
+    if event.translation_source_text.strip():
+        return event.translation_source_text
+    if event.source_text.strip() != event.zh_text.strip():
+        return event.source_text
+    return previous if previous.strip() else ""

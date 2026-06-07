@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("AI 同声传译助手启动中")
     logger.info("当前 ASR 提供方：%s", config.asr_provider)
-    logger.info("当前翻译提供方：%s", config.translation_provider)
+    logger.info("当前翻译提供方：%s", config.active_translation_provider)
     logger.info("已使用 --no-ui 跳过桌面窗口")
     return 0
 

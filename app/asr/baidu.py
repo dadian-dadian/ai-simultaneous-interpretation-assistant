@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +24,7 @@ class BaiduRealtimeTranscript:
     start_seconds: float | None = None
     end_seconds: float | None = None
     is_final: bool = False
+    sentence_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -146,9 +150,20 @@ class BaiduRealtimeAsrSession:
         self._pending_pcm = b""
         self._transcripts: list[BaiduRealtimeTranscript] = []
         self._closed = False
+        self._send_lock = threading.Lock()
+        self._transcripts_lock = threading.Lock()
+        self._received_events: queue.Queue[BaiduRealtimeTranscript] = queue.Queue()
+        self._receive_error: AsrError | None = None
+        self._receiver_done = threading.Event()
+        self._receiver_thread = threading.Thread(
+            target=self._receive_loop,
+            name="baidu-realtime-asr-receiver",
+            daemon=True,
+        )
         self._frame_bytes = int(config.sample_rate * 2 * config.frame_ms / 1000)
         if self._frame_bytes <= 0:
             raise ValueError("frame_ms is too small")
+        self._receiver_thread.start()
 
     def send_audio(self, audio: AudioChunk) -> list[BaiduRealtimeTranscript]:
         if self._closed:
@@ -168,10 +183,11 @@ class BaiduRealtimeAsrSession:
             frame = self._pending_pcm[: self._frame_bytes]
             self._pending_pcm = self._pending_pcm[self._frame_bytes :]
             try:
-                self.connection.send_binary(frame)
+                with self._send_lock:
+                    self.connection.send_binary(frame)
             except websocket.WebSocketException as exc:
                 raise AsrError(f"百度实时 ASR WebSocket 音频发送失败：{exc}") from exc
-            events.extend(self._receive_transcripts(block=False))
+            events.extend(self._drain_received_events())
         return events
 
     def finish(self, duration_seconds: float) -> AsrResult:
@@ -179,11 +195,12 @@ class BaiduRealtimeAsrSession:
             return self._build_result(duration_seconds)
 
         try:
-            if self._pending_pcm:
-                self.connection.send_binary(self._pending_pcm)
-                self._pending_pcm = b""
-            self.connection.send(json.dumps({"type": "FINISH"}))
-            self._receive_transcripts(block=True)
+            with self._send_lock:
+                if self._pending_pcm:
+                    self.connection.send_binary(self._pending_pcm)
+                    self._pending_pcm = b""
+                self.connection.send(json.dumps({"type": "FINISH"}))
+            self._wait_for_finish_events()
         except websocket.WebSocketException as exc:
             raise AsrError(f"百度实时 ASR WebSocket 结束失败：{exc}") from exc
         finally:
@@ -195,23 +212,26 @@ class BaiduRealtimeAsrSession:
             return
         self._closed = True
         self.connection.close()
+        self._receiver_done.wait(timeout=0.5)
 
     def _build_result(self, duration_seconds: float) -> AsrResult:
+        with self._transcripts_lock:
+            transcripts = list(self._transcripts)
         final_segments = tuple(
             AsrTextSegment(
                 text=item.text,
                 start_seconds=item.start_seconds,
                 end_seconds=item.end_seconds,
             )
-            for item in self._transcripts
+            for item in transcripts
             if item.is_final and item.text
         )
-        text = "".join(segment.text for segment in final_segments).strip()
+        text = " ".join(segment.text.strip() for segment in final_segments if segment.text.strip())
         if not text:
             text = next(
                 (
                     item.text.strip()
-                    for item in reversed(self._transcripts)
+                    for item in reversed(transcripts)
                     if item.text.strip()
                 ),
                 "",
@@ -224,60 +244,123 @@ class BaiduRealtimeAsrSession:
             segments=final_segments,
         )
 
-    def _receive_transcripts(self, *, block: bool) -> list[BaiduRealtimeTranscript]:
+    def _receive_loop(self) -> None:
+        try:
+            self.connection.settimeout(min(0.5, self.config.timeout_seconds))
+            while not self._closed:
+                try:
+                    message = self.connection.recv()
+                except websocket.WebSocketConnectionClosedException:
+                    break
+                except websocket.WebSocketTimeoutException:
+                    continue
+                except TimeoutError:
+                    continue
+                except OSError:
+                    if self._closed:
+                        break
+                    raise
+
+                if message in {"", b""}:
+                    break
+                for event in self._events_from_message(message):
+                    self._received_events.put(event)
+        except AsrError as exc:
+            self._receive_error = exc
+        except websocket.WebSocketException as exc:
+            self._receive_error = AsrError(
+                f"百度实时 ASR WebSocket 接收失败：{exc}"
+            )
+        finally:
+            self._receiver_done.set()
+
+    def _drain_received_events(self) -> list[BaiduRealtimeTranscript]:
         events: list[BaiduRealtimeTranscript] = []
-        self.connection.settimeout(self.config.timeout_seconds if block else 0.001)
         while True:
             try:
-                message = self.connection.recv()
-            except websocket.WebSocketConnectionClosedException:
+                events.append(self._received_events.get_nowait())
+            except queue.Empty:
                 break
-            except websocket.WebSocketTimeoutException:
-                if block and not self._transcripts:
-                    raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。") from None
+        if self._receive_error is not None:
+            error = self._receive_error
+            self._receive_error = None
+            raise error
+        return events
+
+    def _wait_for_finish_events(self) -> None:
+        deadline = time.monotonic() + min(self.config.timeout_seconds, 2.5)
+        idle_after_final_seconds = 0.35
+        last_event_at = time.monotonic()
+        seen_final = self._has_final_transcript() or any(
+            event.is_final for event in self._drain_received_events()
+        )
+        while time.monotonic() < deadline:
+            drained = self._drain_received_events()
+            if drained:
+                last_event_at = time.monotonic()
+                seen_final = seen_final or any(event.is_final for event in drained)
+            if self._receiver_done.is_set():
+                return
+            if seen_final and time.monotonic() - last_event_at >= idle_after_final_seconds:
                 break
-            except TimeoutError:
-                if block and not self._transcripts:
-                    raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。") from None
-                break
-            except OSError:
-                if not block:
-                    break
-                raise
+            time.sleep(0.02)
 
-            if message in {"", b""}:
-                break
-            payload = _parse_ws_message(message)
+        with self._transcripts_lock:
+            has_transcripts = bool(self._transcripts)
+        if not has_transcripts and self._receive_error is not None:
+            error = self._receive_error
+            self._receive_error = None
+            raise error
+        if not has_transcripts:
+            raise AsrError("百度实时 ASR WebSocket 等待识别结果超时。")
 
-            response_type = payload.get("type")
-            if response_type == "HEARTBEAT":
-                continue
+    def _has_final_transcript(self) -> bool:
+        with self._transcripts_lock:
+            return any(event.is_final for event in self._transcripts)
 
-            err_no = int(payload.get("err_no", 0))
-            if err_no != 0:
-                if err_no == -3005 and self._transcripts:
-                    break
-                err_msg = payload.get("err_msg") or "unknown error"
-                if response_type == "START":
-                    raise AsrError(f"百度实时 ASR START 失败：err_no={err_no}，{err_msg}")
-                raise AsrError(f"百度实时 ASR 识别失败：err_no={err_no}，{err_msg}")
+    def _events_from_message(self, message: str | bytes) -> list[BaiduRealtimeTranscript]:
+        events: list[BaiduRealtimeTranscript] = []
+        payload = _parse_ws_message(message)
 
+        response_type = payload.get("type")
+        if response_type == "HEARTBEAT":
+            return events
+
+        err_no = int(payload.get("err_no", 0))
+        if err_no != 0:
+            with self._transcripts_lock:
+                has_transcripts = bool(self._transcripts)
+            if err_no == -3005 and has_transcripts:
+                return events
+            err_msg = payload.get("err_msg") or "unknown error"
             if response_type == "START":
-                continue
+                raise AsrError(f"百度实时 ASR START 失败：err_no={err_no}，{err_msg}")
+            raise AsrError(f"百度实时 ASR 识别失败：err_no={err_no}，{err_msg}")
 
-            result = str(payload.get("result", "")).strip()
-            if response_type == "MID_TEXT":
-                event = BaiduRealtimeTranscript(text=result, is_final=False)
-                events.append(event)
+        if response_type == "START":
+            return events
+
+        result = str(payload.get("result", "")).strip()
+        sentence_id = str(payload.get("sn", "")).strip()
+        if response_type == "MID_TEXT":
+            event = BaiduRealtimeTranscript(
+                text=result,
+                is_final=False,
+                sentence_id=sentence_id,
+            )
+            events.append(event)
+            with self._transcripts_lock:
                 self._transcripts.append(event)
-            elif response_type == "FIN_TEXT":
-                event = BaiduRealtimeTranscript(
-                    text=result,
-                    start_seconds=_milliseconds_to_seconds(payload.get("start_time")),
-                    end_seconds=_milliseconds_to_seconds(payload.get("end_time")),
-                    is_final=True,
-                )
-                events.append(event)
+        elif response_type == "FIN_TEXT":
+            event = BaiduRealtimeTranscript(
+                text=result,
+                start_seconds=_milliseconds_to_seconds(payload.get("start_time")),
+                end_seconds=_milliseconds_to_seconds(payload.get("end_time")),
+                is_final=True,
+                sentence_id=sentence_id,
+            )
+            events.append(event)
+            with self._transcripts_lock:
                 self._transcripts.append(event)
 
         return events

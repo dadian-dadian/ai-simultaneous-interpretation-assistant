@@ -35,6 +35,22 @@ class SmoothCaptionLabelTest(unittest.TestCase):
         self.assertEqual(label._opacity_effect.opacity(), 1.0)
         self.assertEqual(label._rollover_count, 0)
 
+    def test_single_block_replacement_triggers_short_animation(self) -> None:
+        label = SmoothCaptionLabel()
+        label.set_caption_text("第一段中文", animate=False)
+
+        label.set_caption_text("第二段中文")
+
+        self.assertEqual(label._rollover_count, 1)
+
+    def test_growing_single_block_does_not_trigger_animation(self) -> None:
+        label = SmoothCaptionLabel()
+        label.set_caption_text("当前翻译", animate=False)
+
+        label.set_caption_text("当前翻译继续增长")
+
+        self.assertEqual(label._rollover_count, 0)
+
     def test_line_rollover_triggers_one_short_animation(self) -> None:
         label = SmoothCaptionLabel()
         label.set_caption_text("previous phrase\ncurrent phrase", animate=False)
