@@ -21,6 +21,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.partial_translation_provider, "")
         self.assertEqual(config.source_language, "en")
         self.assertEqual(config.target_language, "zh-CN")
+        self.assertEqual(config.transcript_storage_dir, "")
 
     def test_baidu_asr_config_can_be_loaded_from_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -122,6 +123,18 @@ class AppConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(config.active_translation_provider, "baidu-mt")
+
+    def test_transcript_storage_dir_can_be_loaded_from_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(
+                    os.environ,
+                    {"TRANSCRIPT_STORAGE_DIR": "D:/captions"},
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+
+        self.assertEqual(config.transcript_storage_dir, "D:/captions")
 
     def test_safe_dict_masks_api_keys(self) -> None:
         config = AppConfig(

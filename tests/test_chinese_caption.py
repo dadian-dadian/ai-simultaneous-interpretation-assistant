@@ -139,6 +139,49 @@ class ChineseCaptionComposerTest(unittest.TestCase):
 
         self.assertEqual(frame.active_text, "较新的翻译草稿")
 
+    def test_untranslated_latest_segment_does_not_reuse_previous_as_active(
+        self,
+    ) -> None:
+        composer = ChineseCaptionComposer()
+        composer.observe_segment("first")
+        composer.accept_final(
+            segment_id="first",
+            source_version=1,
+            translated_text="上一句已经完成。",
+        )
+
+        frame = composer.observe_segment("second")
+
+        self.assertEqual(frame.stable_text, "上一句已经完成。")
+        self.assertEqual(frame.active_text, "")
+        self.assertFalse(frame.is_final)
+
+    def test_delayed_older_translation_does_not_replace_latest_preview(
+        self,
+    ) -> None:
+        composer = ChineseCaptionComposer(max_visible_lines=4)
+        composer.observe_segment("first")
+        composer.observe_segment("second")
+        composer.accept_draft(
+            segment_id="second",
+            source_version=1,
+            translated_text="当前句正在翻译",
+        )
+
+        frame = composer.accept_final(
+            segment_id="first",
+            source_version=2,
+            translated_text="较早句子的迟到翻译。",
+        )
+
+        self.assertEqual(frame.stable_text, "较早句子的迟到翻译。")
+        self.assertEqual(frame.active_text, "当前句正在翻译")
+        self.assertEqual(
+            frame.lines,
+            ("较早句子的迟到翻译。", "当前句正在翻译"),
+        )
+        self.assertEqual(composer.latest_segment_id, "second")
+
 
 if __name__ == "__main__":
     unittest.main()

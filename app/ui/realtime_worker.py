@@ -35,6 +35,7 @@ class RealtimeSubtitleWorker(QObject):
         dropped_chunks_warn_threshold: int = 8,
         max_stream_duration_seconds: float = 0.0,
         rollover_preroll_seconds: float = 0.32,
+        segment_id_prefix: str = "asr",
     ) -> None:
         super().__init__()
         self.config = config
@@ -46,6 +47,7 @@ class RealtimeSubtitleWorker(QObject):
         self.dropped_chunks_warn_threshold = dropped_chunks_warn_threshold
         self.max_stream_duration_seconds = max_stream_duration_seconds
         self.rollover_preroll_seconds = rollover_preroll_seconds
+        self.segment_id_prefix = segment_id_prefix.strip() or "asr"
         self._stop_event = Event()
         self._queued_capture: QueuedAudioCapture | None = None
         self._last_reported_dropped_chunks = 0
@@ -76,7 +78,7 @@ class RealtimeSubtitleWorker(QObject):
             self._queued_capture.start()
             self._last_reported_dropped_chunks = 0
             self.dropped_chunks_changed.emit(0)
-            self.status_changed.emit("监听中")
+            self.status_changed.emit("正在聆听")
 
             while not self._stop_event.is_set():
                 chunk = self._queued_capture.get_chunk(timeout_seconds=0.25)
@@ -92,10 +94,10 @@ class RealtimeSubtitleWorker(QObject):
                 for event in vad_events:
                     if event.type == VadEventType.SPEECH_START:
                         segment_index += 1
-                        active_segment_id = f"asr_{segment_index:04d}"
+                        active_segment_id = self._segment_id(segment_index)
                         sentence_mapper = AsrSentenceMapper(active_segment_id)
                         stream_duration_seconds = 0.0
-                        self.status_changed.emit("识别中")
+                        self.status_changed.emit("正在转译")
 
                         if supports_streaming_asr(client):
                             stream_session, stream_duration_seconds = (
@@ -177,7 +179,7 @@ class RealtimeSubtitleWorker(QObject):
                             sentence_mapper=sentence_mapper,
                         )
                         segment_index += 1
-                        active_segment_id = f"asr_{segment_index:04d}"
+                        active_segment_id = self._segment_id(segment_index)
                         sentence_mapper = AsrSentenceMapper(active_segment_id)
                         stream_session, stream_duration_seconds = self._try_start_stream_segment(
                             client,
@@ -214,16 +216,19 @@ class RealtimeSubtitleWorker(QObject):
                     active_segment_id = ""
                     stream_duration_seconds = 0.0
                     sentence_mapper = None
-                    self.status_changed.emit("监听中")
+                    self.status_changed.emit("正在聆听")
 
             if stream_session is not None:
                 stream_session.close()
         except AsrError as exc:
-            self.error_occurred.emit(f"ASR 识别失败：{exc}")
+            if not self._stop_event.is_set():
+                self.error_occurred.emit(f"实时字幕暂时不可用：{exc}")
         except RuntimeError as exc:
-            self.error_occurred.emit(f"音频采集失败：{exc}")
+            if not self._stop_event.is_set():
+                self.error_occurred.emit(f"音频采集失败：{exc}")
         except Exception as exc:  # noqa: BLE001
-            self.error_occurred.emit(f"实时字幕线程异常：{exc}")
+            if not self._stop_event.is_set():
+                self.error_occurred.emit(f"字幕服务异常：{exc}")
         finally:
             if stream_session is not None:
                 stream_session.close()
@@ -366,6 +371,9 @@ class RealtimeSubtitleWorker(QObject):
             return
         self._last_reported_dropped_chunks = dropped_chunks
         self.dropped_chunks_changed.emit(dropped_chunks)
+
+    def _segment_id(self, segment_index: int) -> str:
+        return f"{self.segment_id_prefix}_{segment_index:04d}"
 
 
 def supports_streaming_asr(client: AsrClient) -> bool:

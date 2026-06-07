@@ -8,6 +8,7 @@ import websocket
 
 from app.asr import (
     AsrConfigurationError,
+    AsrError,
     BaiduRealtimeAsrClient,
     MockAsrClient,
     create_asr_client,
@@ -48,6 +49,28 @@ class TimeoutAfterMessagesWebSocket(FakeWebSocket):
         if not self.messages:
             raise websocket.WebSocketTimeoutException("still open")
         return self.messages.pop(0)
+
+
+class RawSendFailureWebSocket(TimeoutAfterMessagesWebSocket):
+    def send_binary(self, payload: bytes) -> None:
+        del payload
+        raise OSError(10038, "An operation was attempted on something that is not a socket")
+
+
+class RawFinishFailureWebSocket(TimeoutAfterMessagesWebSocket):
+    def send(self, payload: str) -> None:
+        if json.loads(payload).get("type") == "FINISH":
+            raise OSError(
+                10038,
+                "An operation was attempted on something that is not a socket",
+            )
+        super().send(payload)
+
+
+class RawCloseFailureWebSocket(TimeoutAfterMessagesWebSocket):
+    def close(self) -> None:
+        self.closed = True
+        raise OSError(10038, "An operation was attempted on something that is not a socket")
 
 
 class MockAsrClientTest(unittest.TestCase):
@@ -183,6 +206,55 @@ class BaiduRealtimeAsrClientTest(unittest.TestCase):
             BaiduRealtimeAsrClient(app_key="app-key")
         with self.assertRaises(AsrConfigurationError):
             BaiduRealtimeAsrClient(app_id="123")
+
+    def test_raw_windows_socket_send_error_is_wrapped_for_reconnect(self) -> None:
+        audio = AudioChunk(
+            samples=np.zeros((3200, 1), dtype=np.float32),
+            sample_rate=16000,
+        )
+        fake_ws = RawSendFailureWebSocket(messages=[])
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
+
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            session = client.start_stream(language="en")
+            with self.assertRaisesRegex(AsrError, "音频发送失败"):
+                session.send_audio(audio)
+            session.close()
+
+    def test_raw_windows_socket_finish_error_is_wrapped(self) -> None:
+        fake_ws = RawFinishFailureWebSocket(messages=[])
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
+
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            session = client.start_stream(language="en")
+            with self.assertRaisesRegex(AsrError, "结束失败"):
+                session.finish(duration_seconds=1.0)
+
+        self.assertTrue(fake_ws.closed)
+
+    def test_close_ignores_already_closed_windows_socket_error(self) -> None:
+        fake_ws = RawCloseFailureWebSocket(messages=[])
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
+
+        with patch("app.asr.baidu.websocket.create_connection", return_value=fake_ws):
+            session = client.start_stream(language="en")
+            session.close()
+            session.close()
+
+        self.assertTrue(fake_ws.closed)
+
+    def test_raw_windows_socket_connect_error_has_clear_asr_message(self) -> None:
+        client = BaiduRealtimeAsrClient(app_id="123", app_key="app-key")
+
+        with patch(
+            "app.asr.baidu.websocket.create_connection",
+            side_effect=OSError(
+                10038,
+                "An operation was attempted on something that is not a socket",
+            ),
+        ):
+            with self.assertRaisesRegex(AsrError, "无法连接"):
+                client.start_stream(language="en")
 
     def test_resolve_dev_pid_uses_realtime_models(self) -> None:
         self.assertEqual(resolve_baidu_dev_pid(language="en", configured="auto"), 17372)
