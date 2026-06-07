@@ -16,6 +16,7 @@ class RecognitionProfile:
     preroll_seconds: float
     queue_size: int
     dropped_chunks_warn_threshold: int = 8
+    max_stream_duration_seconds: float = 22.0
 
     @property
     def latency_hint(self) -> str:
@@ -34,6 +35,7 @@ RECOGNITION_PROFILES: dict[RecognitionMode, RecognitionProfile] = {
         min_silence_ms=500,
         preroll_seconds=0.6,
         queue_size=32,
+        max_stream_duration_seconds=18.0,
     ),
     "balanced": RecognitionProfile(
         mode="balanced",
@@ -41,6 +43,7 @@ RECOGNITION_PROFILES: dict[RecognitionMode, RecognitionProfile] = {
         min_silence_ms=800,
         preroll_seconds=0.8,
         queue_size=32,
+        max_stream_duration_seconds=22.0,
     ),
     "high-accuracy": RecognitionProfile(
         mode="high-accuracy",
@@ -48,6 +51,7 @@ RECOGNITION_PROFILES: dict[RecognitionMode, RecognitionProfile] = {
         min_silence_ms=1100,
         preroll_seconds=1.0,
         queue_size=64,
+        max_stream_duration_seconds=28.0,
     ),
 }
 

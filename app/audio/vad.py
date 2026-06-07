@@ -100,15 +100,33 @@ class SileroVadSegmenter:
         vad: SileroOnnxVad,
         min_silence_ms: int = 600,
         speech_pad_ms: int = 96,
+        max_buffered_speech_seconds: float | None = 65.0,
     ) -> None:
         if min_silence_ms <= 0:
             raise ValueError("min_silence_ms must be greater than 0")
         if speech_pad_ms < 0:
             raise ValueError("speech_pad_ms cannot be negative")
+        if (
+            max_buffered_speech_seconds is not None
+            and max_buffered_speech_seconds <= 0
+        ):
+            raise ValueError("max_buffered_speech_seconds must be greater than 0")
 
         self.vad = vad
         self.min_silence_frames = _ms_to_frame_count(min_silence_ms)
         self.speech_pad_frames = _ms_to_frame_count(speech_pad_ms)
+        self.max_buffered_speech_frames = (
+            None
+            if max_buffered_speech_seconds is None
+            else max(
+                1,
+                int(
+                    max_buffered_speech_seconds
+                    * self.vad.sample_rate
+                    / SILERO_FRAME_SIZE
+                ),
+            )
+        )
         self.reset()
 
     def reset(self) -> None:
@@ -169,6 +187,7 @@ class SileroVadSegmenter:
             return [VadSegmentEvent(type=VadEventType.SPEECH_START, speech_probability=probability)]
 
         self._active_frames.append(frame)
+        self._trim_active_frames()
         return []
 
     def _accept_silence_frame(self, frame: np.ndarray, probability: float) -> list[VadSegmentEvent]:
@@ -181,6 +200,7 @@ class SileroVadSegmenter:
             return []
 
         self._active_frames.append(frame)
+        self._trim_active_frames()
         self._silence_frames += 1
         if self._silence_frames < self.min_silence_frames:
             return []
@@ -213,6 +233,15 @@ class SileroVadSegmenter:
         self._silence_frames = 0
         self._in_speech = False
         return segment
+
+    def _trim_active_frames(self) -> None:
+        if self.max_buffered_speech_frames is None:
+            return
+        overflow = len(self._active_frames) - self.max_buffered_speech_frames
+        if overflow <= 0:
+            return
+        del self._active_frames[:overflow]
+        self._segment_start_sample += overflow * SILERO_FRAME_SIZE
 
 
 def default_silero_model_path() -> Path:

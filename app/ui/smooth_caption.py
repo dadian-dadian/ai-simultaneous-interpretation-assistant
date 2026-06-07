@@ -30,7 +30,7 @@ class SmoothCaptionLabel(QLabel):
 
         old_lines = tuple(self.text().splitlines())
         new_lines = tuple(text.splitlines())
-        should_animate = animate and _is_line_rollover(old_lines, new_lines)
+        should_animate = animate and _should_soft_fade(old_lines, new_lines)
 
         self.setText(text)
         if should_animate:
@@ -44,6 +44,27 @@ class SmoothCaptionLabel(QLabel):
         elif self._rollover_animation.state() != QPropertyAnimation.State.Running:
             self._opacity_effect.setOpacity(1.0)
         return True
+
+
+def _should_soft_fade(old_lines: tuple[str, ...], new_lines: tuple[str, ...]) -> bool:
+    if not any(line.strip() for line in new_lines):
+        return False
+    if not any(line.strip() for line in old_lines):
+        return True
+    if _is_single_block_replacement(old_lines, new_lines):
+        return True
+    return _is_line_rollover(old_lines, new_lines)
+
+
+def _is_single_block_replacement(
+    old_lines: tuple[str, ...],
+    new_lines: tuple[str, ...],
+) -> bool:
+    if len(old_lines) > 1 or len(new_lines) > 1 or old_lines == new_lines:
+        return False
+    old_text = old_lines[0] if old_lines else ""
+    new_text = new_lines[0] if new_lines else ""
+    return bool(old_text) and not new_text.startswith(old_text)
 
 
 def _is_line_rollover(old_lines: tuple[str, ...], new_lines: tuple[str, ...]) -> bool:

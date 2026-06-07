@@ -18,6 +18,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(config.asr_baidu_dev_pid, "auto")
         self.assertEqual(config.asr_timeout_seconds, 30.0)
         self.assertEqual(config.translation_provider, "mock")
+        self.assertEqual(config.partial_translation_provider, "")
         self.assertEqual(config.source_language, "en")
         self.assertEqual(config.target_language, "zh-CN")
 
@@ -80,11 +81,55 @@ class AppConfigTest(unittest.TestCase):
 
         self.assertEqual(config.asr_provider, "baidu-realtime")
 
+    def test_partial_translation_config_can_be_loaded_from_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "PARTIAL_TRANSLATION_PROVIDER": "baidu-mt",
+                        "PARTIAL_TRANSLATION_APP_ID": "app-id",
+                        "PARTIAL_TRANSLATION_API_KEY": "api-key",
+                        "PARTIAL_TRANSLATION_SECRET_KEY": "secret-key",
+                        "PARTIAL_TRANSLATION_TIMEOUT_SECONDS": "3.5",
+                    },
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+
+        self.assertEqual(config.partial_translation_provider, "baidu-mt")
+        self.assertEqual(config.partial_translation_app_id, "app-id")
+        self.assertEqual(config.partial_translation_api_key, "api-key")
+        self.assertEqual(config.partial_translation_secret_key, "secret-key")
+        self.assertEqual(config.partial_translation_timeout_seconds, 3.5)
+
+    def test_legacy_partial_translation_secret_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("app.core.config.project_root", return_value=Path(tmp_dir)):
+                with patch.dict(
+                    os.environ,
+                    {"PARTIAL_TRANSLATION_SECRET": "legacy-secret"},
+                    clear=True,
+                ):
+                    config = AppConfig.from_env()
+
+        self.assertEqual(config.partial_translation_secret_key, "legacy-secret")
+
+    def test_active_translation_provider_prefers_partial_provider(self) -> None:
+        config = AppConfig(
+            translation_provider="openai-compatible",
+            partial_translation_provider="baidu-mt",
+        )
+
+        self.assertEqual(config.active_translation_provider, "baidu-mt")
+
     def test_safe_dict_masks_api_keys(self) -> None:
         config = AppConfig(
             asr_app_id="123",
             asr_api_key="sk-test-123456",
             translation_api_key="short",
+            partial_translation_api_key="partial-api-key",
+            partial_translation_secret_key="partial-secret-key",
         )
 
         safe_config = config.to_safe_dict()
@@ -92,6 +137,11 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(safe_config["asr_app_id"], "123")
         self.assertEqual(safe_config["asr_api_key"], "sk-t****3456")
         self.assertEqual(safe_config["translation_api_key"], "********")
+        self.assertEqual(safe_config["partial_translation_api_key"], "part****-key")
+        self.assertEqual(
+            safe_config["partial_translation_secret_key"],
+            "part****-key",
+        )
 
 
 if __name__ == "__main__":
